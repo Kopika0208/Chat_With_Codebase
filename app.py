@@ -36,7 +36,7 @@ try:
 except Exception:
     print("⚠️ LangSmith inactive")
 
-EMBED_MODEL = "thenlper/gte-base"
+EMBED_MODEL = "mixedbread-ai/mxbai-embed-large-v1"
 DEFAULT_REPO_PATH = "repos/myrepo"
 
 

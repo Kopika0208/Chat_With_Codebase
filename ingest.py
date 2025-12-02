@@ -475,7 +475,7 @@ TARGET_REPO_DIR = "repos/myrepo"
 VECTOR_DIR = "data/vector_store"
 CALLGRAPH_PATH = "data/call_graph.json"
 EXTENSIONS = ('.py', '.js', '.java', '.ts', '.md', '.txt', '.go', '.cpp', '.c', '.h', '.rs')
-EMBED_MODEL = "thenlper/gte-base"
+EMBED_MODEL = "mixedbread-ai/mxbai-embed-large-v1"
 
 # ===============================
 # HELPERS
