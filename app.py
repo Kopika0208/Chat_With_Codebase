@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from pyvis.network import Network
 import networkx as nx
 
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_groq import ChatGroq
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.prompts import ChatPromptTemplate
@@ -56,7 +56,7 @@ def get_vectorstore():
 
 @st.cache_resource(show_spinner=False)
 def get_llm():
-    return ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.2)
+    return ChatGroq(model="llama-3.1-8b-instant", temperature=0.2)
 
 
 @st.cache_resource(show_spinner=False)
