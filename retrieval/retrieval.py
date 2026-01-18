@@ -346,3 +346,48 @@ def matched_terms_in_chunk(query: str, doc: Document) -> List[str]:
     text_tokens = set(re.findall(r"[a-zA-Z_]\w*", (doc.page_content or "").lower()))
     common = sorted(q_tokens.intersection(text_tokens))
     return common[:10]
+
+
+def symbol_aware_retrieve(query: str, top_k: int = 6) -> List[Document]:
+    """
+    High-level function combining vector search + symbol-driven ranking.
+    Uses symbol table and call graph to intelligently rank results.
+    
+    Flow:
+    1. Vector search for base candidates
+    2. Extract and match query keywords to symbols
+    3. Build candidate set from direct matches + call graph neighbors
+    4. Re-rank using: symbol_match + callgraph_distance + locality + embedding
+    5. Return top-k documents with direct implementations first
+    """
+    from cache import load_symbol_table_cached, load_call_graph_cached, get_embeddings
+    try:
+        from symbol_driven_ranking import symbol_driven_multi_rank
+    except ImportError:
+        print("⚠️ symbol_driven_ranking module not found. Falling back to standard retrieval.")
+        return multi_hop_retrieve(query, {}, hops=2, base_k=16, top_k=top_k)
+    
+    # Get raw vector candidates
+    vector_candidates = stage1_vector_search(query, k=16)
+    
+    if not vector_candidates:
+        print("⚠️ No vector candidates found")
+        return []
+    
+    # Load knowledge bases
+    symbol_table = load_symbol_table_cached()
+    call_graph = load_call_graph_cached()
+    embeddings = get_embeddings()
+    
+    # Apply symbol-driven ranking
+    ranked_docs = symbol_driven_multi_rank(
+        query=query,
+        vector_candidates=vector_candidates,
+        symbol_table=symbol_table,
+        call_graph=call_graph,
+        embeddings=embeddings,
+        top_k=top_k,
+        verbose=True
+    )
+    
+    return ranked_docs

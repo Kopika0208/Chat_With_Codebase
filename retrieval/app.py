@@ -34,6 +34,7 @@ from retrieval import (
     matched_terms_in_chunk,
     stage1_vector_search,
     hybrid_rerank,
+    symbol_aware_retrieve,  # Add to imports
 )
 from utils import (
     rewrite_query_if_enabled,
@@ -217,10 +218,16 @@ def run_query_pipeline(query: str, enable_query_rewrite: bool, enable_multi_hop:
         inferred_filters = infer_metadata_filters_from_query(query)
 
         # 2️⃣ Retrieval (single-hop or multi-hop)
+                # 2️⃣ Retrieval (single-hop, multi-hop, or symbol-driven)
         if enable_multi_hop:
-            candidate_docs = multi_hop_retrieve(
-                effective_query, inferred_filters, hops=2, base_k=16, top_k=8
-            )
+            # Use symbol-driven ranking for better results
+            try:
+                candidate_docs = symbol_aware_retrieve(effective_query, top_k=8)
+            except Exception as e:
+                print(f"⚠️ Symbol-aware retrieval failed: {e}, falling back to multi-hop")
+                candidate_docs = multi_hop_retrieve(
+                    effective_query, inferred_filters, hops=2, base_k=16, top_k=8
+                )
         else:
             scores = stage1_vector_search(effective_query, k=16)
             candidate_docs = hybrid_rerank(effective_query, scores, inferred_filters, top_k=8)
