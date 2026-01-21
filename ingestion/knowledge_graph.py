@@ -2,18 +2,22 @@
 
 import ast
 import re
-from typing import Dict, List, Optional, Any, Set
-from dataclasses import dataclass, field
+import json
+from typing import Dict, List, Optional, Any, Set, Tuple
+from dataclasses import dataclass, field, asdict
 from collections import defaultdict
 from .symbols import Symbol, SymbolTable
 
 
 @dataclass
 class KnowledgeGraphNode:
-    """Represents a node in the knowledge graph."""
-    node_id: str  # unique identifier
-    node_type: str  # "function", "class", "method", "variable", "return_value", "parameter", "import"
-    name: str
+    """Represents a node in the knowledge graph.
+    
+    Stable node IDs are in format: file.py:symbol_name or file.js:ClassName.method
+    """
+    node_id: str  # unique identifier: file:symbol (stable)
+    node_type: str  # "function", "class", "method", "variable", "module", "import"
+    name: str  # short name
     file_path: str
     line_number: int
     properties: Dict[str, Any] = field(default_factory=dict)
@@ -25,14 +29,29 @@ class KnowledgeGraphNode:
         if isinstance(other, KnowledgeGraphNode):
             return self.node_id == other.node_id
         return False
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to JSON-serializable dict."""
+        return {
+            "id": self.node_id,
+            "type": self.node_type,
+            "name": self.name,
+            "file": self.file_path,
+            "line": self.line_number,
+            "properties": self.properties,
+        }
 
 
 @dataclass
 class KnowledgeGraphEdge:
-    """Represents an edge in the knowledge graph."""
+    """Represents an edge in the knowledge graph.
+    
+    Edge types: calls, called_by, defines, uses, dataflow, 
+               inherits, overrides, sibling_method, test_relationship, contains
+    """
     source_id: str
     target_id: str
-    edge_type: str
+    edge_type: str  # typed relationship
     properties: Dict[str, Any] = field(default_factory=dict)
     
     def __hash__(self):
@@ -44,71 +63,156 @@ class KnowledgeGraphEdge:
                     self.target_id == other.target_id and
                     self.edge_type == other.edge_type)
         return False
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to JSON-serializable dict."""
+        return {
+            "source": self.source_id,
+            "target": self.target_id,
+            "type": self.edge_type,
+            "properties": self.properties,
+        }
 
 
 class KnowledgeGraph:
-    """Comprehensive knowledge graph for codebase understanding."""
+    """Comprehensive knowledge graph for codebase understanding.
+    
+    Stores nodes (symbols) and typed edges (relationships):
+    - calls / called_by: function call relationships
+    - dataflow: data flow dependencies
+    - defines / uses: definition-use relationships
+    - inherits / overrides: class hierarchy
+    - sibling_method: class methods
+    - test_relationship: test ↔ production code
+    - contains: parent-child relationships
+    """
     
     def __init__(self):
         self.nodes: Dict[str, KnowledgeGraphNode] = {}
         self.edges: Set[KnowledgeGraphEdge] = set()
-        self.adjacency: Dict[str, List[KnowledgeGraphEdge]] = defaultdict(list)
+        # Adjacency index: node_id -> List of outgoing edges
+        self.adjacency_out: Dict[str, List[KnowledgeGraphEdge]] = defaultdict(list)
+        # Reverse adjacency: node_id -> List of incoming edges
+        self.adjacency_in: Dict[str, List[KnowledgeGraphEdge]] = defaultdict(list)
     
     def add_node(self, node: KnowledgeGraphNode) -> None:
         """Add a node to the graph."""
         self.nodes[node.node_id] = node
     
     def add_edge(self, edge: KnowledgeGraphEdge) -> None:
-        """Add an edge to the graph."""
+        """Add an edge to the graph, avoiding duplicates."""
         if edge not in self.edges:
             self.edges.add(edge)
-            self.adjacency[edge.source_id].append(edge)
+            self.adjacency_out[edge.source_id].append(edge)
+            self.adjacency_in[edge.target_id].append(edge)
     
     def get_node(self, node_id: str) -> Optional[KnowledgeGraphNode]:
         """Retrieve a node by ID."""
         return self.nodes.get(node_id)
     
-    def get_outgoing_edges(self, node_id: str, edge_type: str = None) -> List[KnowledgeGraphEdge]:
+    def get_outgoing_edges(self, node_id: str, edge_type: Optional[str] = None) -> List[KnowledgeGraphEdge]:
         """Get all outgoing edges from a node, optionally filtered by type."""
-        edges = self.adjacency.get(node_id, [])
+        edges = self.adjacency_out.get(node_id, [])
         if edge_type:
             edges = [e for e in edges if e.edge_type == edge_type]
         return edges
     
-    def get_incoming_edges(self, node_id: str, edge_type: str = None) -> List[KnowledgeGraphEdge]:
+    def get_incoming_edges(self, node_id: str, edge_type: Optional[str] = None) -> List[KnowledgeGraphEdge]:
         """Get all incoming edges to a node, optionally filtered by type."""
-        edges = [e for e in self.edges if e.target_id == node_id]
+        edges = self.adjacency_in.get(node_id, [])
         if edge_type:
             edges = [e for e in edges if e.edge_type == edge_type]
         return edges
+    
+    def get_neighbors(self, node_id: str, edge_types: Optional[List[str]] = None,
+                     direction: str = "both") -> Set[str]:
+        """Get all neighbor node IDs, optionally filtered by edge types.
+        
+        Args:
+            node_id: The node to find neighbors for
+            edge_types: Filter by edge types, e.g., ["calls", "called_by"]
+            direction: "out" (outgoing), "in" (incoming), or "both"
+        
+        Returns:
+            Set of neighbor node IDs
+        """
+        neighbors = set()
+        
+        if direction in ("out", "both"):
+            for edge in self.get_outgoing_edges(node_id):
+                if edge_types is None or edge.edge_type in edge_types:
+                    neighbors.add(edge.target_id)
+        
+        if direction in ("in", "both"):
+            for edge in self.get_incoming_edges(node_id):
+                if edge_types is None or edge.edge_type in edge_types:
+                    neighbors.add(edge.source_id)
+        
+        return neighbors
     
     def export_to_dict(self) -> Dict[str, Any]:
         """Export graph as dictionary for JSON serialization."""
         return {
-            "nodes": {
-                node_id: {
-                    "type": node.node_type,
-                    "name": node.name,
-                    "file": node.file_path,
-                    "line": node.line_number,
-                    "properties": node.properties,
-                }
-                for node_id, node in self.nodes.items()
+            "metadata": {
+                "node_count": len(self.nodes),
+                "edge_count": len(self.edges),
+                "version": "1.0",
             },
-            "edges": [
-                {
-                    "source": edge.source_id,
-                    "target": edge.target_id,
-                    "type": edge.edge_type,
-                    "properties": edge.properties,
-                }
-                for edge in self.edges
-            ],
+            "nodes": [node.to_dict() for node in self.nodes.values()],
+            "edges": [edge.to_dict() for edge in self.edges],
         }
+    
+    def to_json(self, path: str) -> None:
+        """Persist graph to JSON file."""
+        data = self.export_to_dict()
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+    
+    @classmethod
+    def from_json(cls, path: str) -> "KnowledgeGraph":
+        """Load graph from JSON file."""
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        
+        graph = cls()
+        
+        # Load nodes
+        for node_data in data.get("nodes", []):
+            node = KnowledgeGraphNode(
+                node_id=node_data["id"],
+                node_type=node_data["type"],
+                name=node_data["name"],
+                file_path=node_data["file"],
+                line_number=node_data["line"],
+                properties=node_data.get("properties", {}),
+            )
+            graph.add_node(node)
+        
+        # Load edges
+        for edge_data in data.get("edges", []):
+            edge = KnowledgeGraphEdge(
+                source_id=edge_data["source"],
+                target_id=edge_data["target"],
+                edge_type=edge_data["type"],
+                properties=edge_data.get("properties", {}),
+            )
+            graph.add_edge(edge)
+        
+        return graph
+
 
 
 class KnowledgeGraphBuilder:
-    """Build comprehensive knowledge graph from symbol table and data flow analysis."""
+    """Build comprehensive knowledge graph from symbol tables, call graphs, and data flow.
+    
+    Extracts:
+    - Function/class definitions (nodes)
+    - Call relationships (calls, called_by)
+    - Data flow (defines, uses, dataflow)
+    - Class hierarchy (inherits, overrides)
+    - Test relationships (test_relationship)
+    - Attribute access (uses)
+    """
     
     def __init__(self):
         self.graph = KnowledgeGraph()
@@ -118,6 +222,8 @@ class KnowledgeGraphBuilder:
     
     def build_from_symbols(self, symbol_tables: Dict[str, SymbolTable]) -> None:
         """Build graph from symbol tables."""
+        print("🏗️ Building knowledge graph from symbol tables...")
+        
         # First pass: add all symbol nodes
         for file_path, symbol_table in symbol_tables.items():
             for fqn, symbol in symbol_table.all_symbols.items():
@@ -130,7 +236,7 @@ class KnowledgeGraphBuilder:
                     properties={
                         "is_private": symbol.is_private,
                         "is_static": symbol.is_static,
-                        "docstring": symbol.docstring,
+                        "docstring": symbol.docstring[:200] if symbol.docstring else None,
                         "parent_symbol": symbol.parent_symbol,
                     }
                 )
@@ -140,75 +246,61 @@ class KnowledgeGraphBuilder:
         for file_path, symbol_table in symbol_tables.items():
             for fqn, symbol in symbol_table.all_symbols.items():
                 self._build_symbol_edges(symbol, symbol_table, file_path)
+        
+        print(f"✅ Built graph with {len(self.graph.nodes)} nodes")
     
     def build_from_dataflow(self, dataflow_by_file: Dict[str, Dict[str, Any]]) -> None:
-        """Build graph from data flow analysis."""
+        """Add dataflow relationships to the graph."""
+        print("📊 Adding dataflow edges to knowledge graph...")
+        
         for file_path, functions in dataflow_by_file.items():
             for func_name, analysis in functions.items():
-                # Add return value node
-                return_node_id = f"{file_path}:{func_name}:return"
-                return_node = KnowledgeGraphNode(
-                    node_id=return_node_id,
-                    node_type="return_value",
-                    name=f"return_{func_name}",
-                    file_path=file_path,
-                    line_number=analysis.get("line", 0),
-                    properties={"function": func_name}
-                )
-                self.graph.add_node(return_node)
+                func_node_id = f"{file_path}:{func_name}"
                 
-                # Add definition and use relationships
-                for var_name, defs in analysis.get("definitions", {}).items():
-                    for defn in defs:
-                        def_node_id = f"{file_path}:{func_name}:{var_name}@{defn['line']}"
-                        def_node = KnowledgeGraphNode(
-                            node_id=def_node_id,
-                            node_type="definition",
-                            name=var_name,
-                            file_path=file_path,
-                            line_number=defn["line"],
-                            properties={
-                                "inferred_type": defn.get("type"),
-                                "constant_value": defn.get("constant"),
-                                "is_parameter": defn.get("is_param", False),
-                            }
-                        )
-                        self.graph.add_node(def_node)
+                # Only add dataflow edges if the function node exists
+                if func_node_id not in self.graph.nodes:
+                    continue
                 
                 # Add def-use chain edges
                 for chain_id, chain_data in analysis.get("def_use_chains", {}).items():
-                    parts = chain_id.split("@")
-                    var_name = parts[0]
-                    def_line = int(parts[1]) if len(parts) > 1 else 0
-                    
-                    def_node_id = f"{file_path}:{func_name}:{var_name}@{def_line}"
-                    
                     for use in chain_data.get("uses", []):
-                        use_node_id = f"{file_path}:{func_name}:{var_name}_use@{use['line']}"
-                        use_node = KnowledgeGraphNode(
-                            node_id=use_node_id,
-                            node_type="use",
-                            name=f"{var_name}_use",
-                            file_path=file_path,
-                            line_number=use["line"],
-                            properties={"context": use.get("context", "unknown")}
-                        )
-                        self.graph.add_node(use_node)
-                        
-                        # Add flow edge
+                        # Add dataflow edge to indicate data dependency
                         edge = KnowledgeGraphEdge(
-                            source_id=def_node_id,
-                            target_id=use_node_id,
-                            edge_type="flow",
+                            source_id=func_node_id,
+                            target_id=func_node_id,  # Self-loop for internal dataflow
+                            edge_type="dataflow",
                             properties={
-                                "variable": var_name,
-                                "flow_type": "def_use",
+                                "variable": chain_id.split("@")[0],
+                                "from_line": int(chain_id.split("@")[1]) if "@" in chain_id else 0,
+                                "to_line": use.get("line", 0),
                             }
                         )
                         self.graph.add_edge(edge)
     
+    def add_call_graph(self, call_graph: Dict[str, List[str]]) -> None:
+        """Add call graph as edges to the knowledge graph."""
+        print("📞 Adding call graph edges to knowledge graph...")
+        
+        edges_added = 0
+        for caller_fqn, callees in call_graph.items():
+            if caller_fqn not in self.graph.nodes:
+                continue
+            
+            for callee_fqn in callees:
+                # Add "calls" edge
+                edge = KnowledgeGraphEdge(
+                    source_id=caller_fqn,
+                    target_id=callee_fqn,
+                    edge_type="calls",
+                    properties={"call_count": 1}
+                )
+                self.graph.add_edge(edge)
+                edges_added += 1
+        
+        print(f"✅ Added {edges_added} call graph edges")
+    
     def _build_symbol_edges(self, symbol: Symbol, symbol_table: SymbolTable, file_path: str) -> None:
-        """Build edges for a symbol."""
+        """Build edges for a symbol based on scope and relationships."""
         fqn = symbol.fully_qualified_name
         
         # Inheritance edges
@@ -225,38 +317,6 @@ class KnowledgeGraphBuilder:
                     )
                     self.graph.add_edge(edge)
         
-        # Import edges
-        if symbol.kind == "import":
-            edge = KnowledgeGraphEdge(
-                source_id=fqn,
-                target_id=symbol.docstring or "external",
-                edge_type="imports",
-                properties={"module": symbol.docstring}
-            )
-            self.graph.add_edge(edge)
-        
-        # Docstring relationship
-        if symbol.docstring and symbol.kind in ("function", "method", "class"):
-            doc_node_id = f"{file_path}:{symbol.name}:docstring"
-            if doc_node_id not in self.graph.nodes:
-                doc_node = KnowledgeGraphNode(
-                    node_id=doc_node_id,
-                    node_type="docstring",
-                    name=f"doc_{symbol.name}",
-                    file_path=file_path,
-                    line_number=symbol.line_number,
-                    properties={"content": symbol.docstring[:200]}
-                )
-                self.graph.add_node(doc_node)
-            
-            edge = KnowledgeGraphEdge(
-                source_id=doc_node_id,
-                target_id=fqn,
-                edge_type="documents",
-                properties={"documentation_type": "docstring"}
-            )
-            self.graph.add_edge(edge)
-        
         # Parent-child relationship (method in class)
         if symbol.parent_symbol and ":" in symbol.parent_symbol:
             parent_fqn = symbol.parent_symbol
@@ -264,63 +324,38 @@ class KnowledgeGraphBuilder:
                 edge = KnowledgeGraphEdge(
                     source_id=parent_fqn,
                     target_id=fqn,
-                    edge_type="contains_method",
+                    edge_type="contains",
                     properties={"member_type": symbol.kind}
                 )
                 self.graph.add_edge(edge)
     
-    def add_call_graph_edges(self, call_graph: Dict[str, List[str]]) -> None:
-        """Add call graph as edges to the knowledge graph."""
-        for caller_fqn, callees in call_graph.items():
-            for callee_fqn in callees:
-                # Ensure nodes exist
-                if caller_fqn in self.graph.nodes and callee_fqn in self.graph.nodes:
-                    edge = KnowledgeGraphEdge(
-                        source_id=caller_fqn,
-                        target_id=callee_fqn,
-                        edge_type="calls"
-                    )
-                    self.graph.add_edge(edge)
+    def add_test_relationships(self, test_map: Dict[str, str]) -> None:
+        """Add edges between test and production code.
+        
+        Args:
+            test_map: Dict mapping test node IDs to production node IDs
+        """
+        print("🧪 Adding test relationships...")
+        
+        for test_fqn, prod_fqn in test_map.items():
+            if test_fqn in self.graph.nodes and prod_fqn in self.graph.nodes:
+                edge = KnowledgeGraphEdge(
+                    source_id=test_fqn,
+                    target_id=prod_fqn,
+                    edge_type="test_relationship",
+                    properties={"direction": "tests"}
+                )
+                self.graph.add_edge(edge)
     
-    def add_attribute_access_edges(self, symbol_tables: Dict[str, SymbolTable]) -> None:
-        """Add attribute access edges from source code analysis."""
-        for file_path, symbol_table in symbol_tables.items():
-            try:
-                with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                    source_code = f.read()
-                
-                tree = ast.parse(source_code)
-                
-                class AttributeVisitor(ast.NodeVisitor):
-                    def __init__(self, builder, file_path):
-                        self.builder = builder
-                        self.file_path = file_path
-                        self.current_context = None
-                    
-                    def visit_FunctionDef(self, node):
-                        old_context = self.current_context
-                        self.current_context = f"{file_path}:{node.name}"
-                        self.generic_visit(node)
-                        self.current_context = old_context
-                    
-                    def visit_AsyncFunctionDef(self, node):
-                        old_context = self.current_context
-                        self.current_context = f"{file_path}:{node.name}"
-                        self.generic_visit(node)
-                        self.current_context = old_context
-                    
-                    def visit_Attribute(self, node):
-                        # obj.attr access
-                        if isinstance(node.value, ast.Name) and self.current_context:
-                            obj_name = node.value.id
-                            attr_name = node.attr
-                            
-                            # Try to find the attribute in the graph
-                            attr_node_id = f"{self.file_path}:{attr_name}"
-                            
-                            if self.current_context in self.builder.graph.nodes and attr_node_id in self.builder.graph.nodes:
-                                edge = KnowledgeGraphEdge(
-                                    source_id=self.current_context,
+    def export(self, path: str) -> None:
+        """Export the knowledge graph to JSON."""
+        self.graph.to_json(path)
+        print(f"💾 Knowledge graph saved to {path}")
+    
+    def get_graph(self) -> KnowledgeGraph:
+        """Return the built knowledge graph."""
+        return self.graph
+
                                     target_id=attr_node_id,
                                     edge_type="accesses_attribute",
                                     properties={

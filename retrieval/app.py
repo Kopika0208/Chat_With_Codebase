@@ -24,6 +24,12 @@ from cache import (
     get_vectorstore,
     get_llm,
     load_call_graph_cached,
+    get_graph_rag_retriever,
+    load_knowledge_graph_cached,
+    load_graph_traversal_cached,
+    load_symbol_table_cached,
+    load_dataflow_data_cached,
+    get_unified_retriever,
 )
 from retrieval import (
     infer_metadata_filters_from_query,
@@ -129,9 +135,15 @@ if st.button("🚀 Start Ingestion"):
                 )
             st.success("🎉 Ingestion complete!")
 
-            # Clear caches so new repo/index/graph are picked up
+            # Clear ALL repo-dependent caches so new data is picked up
             get_vectorstore.clear()
             load_call_graph_cached.clear()
+            get_graph_rag_retriever.clear()
+            load_knowledge_graph_cached.clear()
+            load_graph_traversal_cached.clear()
+            load_symbol_table_cached.clear()
+            load_dataflow_data_cached.clear()
+            get_unified_retriever.clear()
 
             # Reset previous QA results
             for key in ["last_answer", "last_docs", "last_query"]:
@@ -277,20 +289,34 @@ def run_query_pipeline(query: str, enable_query_rewrite: bool, enable_multi_hop:
 st.divider()
 st.subheader("💡 Ask Questions About Your Codebase")
 
+# Retrieval strategy selection
+retrieval_strategy = st.radio(
+    "🔄 Choose retrieval strategy:",
+    ["Semantic + Multi-hop", "Graph-RAG (Knowledge Graph + Vector Search)"],
+    help="Semantic: Traditional vector search with call graph. Graph-RAG: Knowledge graph with intelligent expansion.",
+)
+
 enable_query_rewrite = st.checkbox(
     "✏️ Enable smart query rewriting (improves search)",
     value=True,
 )
 
-enable_multi_hop = st.checkbox(
-    "🔁 Enable multi-hop retrieval (follow related files/symbols)",
-    value=True,
-)
-
-enable_reasoning_chain = st.checkbox(
-    "🧠 Enable multi-step reasoning chain (advanced reasoning)",
-    value=False,
-)
+if retrieval_strategy == "Graph-RAG (Knowledge Graph + Vector Search)":
+    col1, col2 = st.columns(2)
+    with col1:
+        graph_max_depth = st.slider("📊 Graph traversal depth:", 1, 4, 2)
+    with col2:
+        graph_strategy = st.selectbox("📈 Traversal strategy:", ["bfs", "dfs"])
+else:
+    enable_multi_hop = st.checkbox(
+        "🔁 Enable multi-hop retrieval (follow related files/symbols)",
+        value=True,
+    )
+    
+    enable_reasoning_chain = st.checkbox(
+        "🧠 Enable multi-step reasoning chain (advanced reasoning)",
+        value=False,
+    )
 
 query = st.text_input(
     "🔍 Your question (e.g., 'Where is judgment prediction implemented?'):",
@@ -300,20 +326,120 @@ query = st.text_input(
 run_query = st.button("🚀 Run Query", type="primary")
 
 
+# ======================================================
+# 🚀 GRAPH-RAG QUERY PIPELINE
+# ======================================================
+def run_graph_rag_pipeline(query: str, enable_query_rewrite: bool, max_depth: int, 
+                          strategy: str) -> dict:
+    """Execute Graph-RAG query pipeline."""
+    try:
+        print("[App] Initializing Graph-RAG retriever...")
+        retriever = get_graph_rag_retriever()
+        if not retriever:
+            st.error("❌ Failed to initialize Graph-RAG retriever. Check console for details.")
+            return None
+        
+        print("[App] ✓ Retriever initialized")
+        
+        # Optionally rewrite query
+        effective_query = rewrite_query_if_enabled(query, enable_query_rewrite)
+        
+        # Run Graph-RAG retrieval
+        print(f"[App] Running Graph-RAG retrieval: {effective_query!r}")
+        result = retriever.retrieve(
+            query=effective_query,
+            k_initial=5,
+            max_depth=max_depth,
+            strategy=strategy,
+            edge_types=["calls", "called_by", "contains", "dataflow"],
+            deduplicate=True
+        )
+        
+        print(f"[App] ✓ Retrieved {len(result.final_documents)} documents")
+        
+        if not result.final_documents:
+            st.warning("⚠️ No relevant code found. Try rephrasing your question.")
+            return None
+        
+        # Build context for LLM
+        context_parts = []
+        for doc in result.final_documents:
+            meta = doc.metadata or {}
+            path = meta.get("path", "unknown")
+            symbol = meta.get("symbol_name", "")
+            lines = f"{meta.get('start_line', '?')}-{meta.get('end_line', '?')}"
+            context_parts.append(f"[{path}:{symbol} lines {lines}]\n{doc.page_content}")
+        
+        context_str = "\n\n---\n\n".join(context_parts)
+        
+        # Build sources string
+        sources_parts = []
+        for doc in result.final_documents:
+            meta = doc.metadata or {}
+            path = meta.get("path", "unknown")
+            symbol = meta.get("symbol_name", "")
+            start = meta.get("start_line", 1)
+            end = meta.get("end_line", 1)
+            sources_parts.append(f"- {path}:{symbol} ({start}–{end})")
+        
+        sources_str = "\n".join(sources_parts) or "No sources found"
+        
+        # Get LLM answer
+        llm = get_llm()
+        response = llm.invoke(
+            prompt.format_prompt(
+                context=context_str,
+                sources=sources_str,
+                input=query,
+            ).to_messages()
+        )
+        answer = response.content.strip()
+        
+        return {
+            "answer": answer,
+            "final_docs": result.final_documents,
+            "context": context_str,
+            "sources": sources_str,
+            "graph_rag_result": result,
+            "anchor_nodes": result.anchor_nodes,
+            "total_nodes_visited": len(result.expansion_result.visited_nodes),
+        }
+    
+    except Exception as e:
+        st.error(f"❌ Error in Graph-RAG pipeline: {type(e).__name__}: {e}")
+        st.text(traceback.format_exc())
+        return None
+
+
+
 if run_query and query:
     with st.spinner("🔎 Processing your query..."):
-        result = run_query_pipeline(
-            query=query,
-            enable_query_rewrite=enable_query_rewrite,
-            enable_multi_hop=enable_multi_hop,
-            enable_reasoning_chain=enable_reasoning_chain,
-            k=10
-        )
+        if retrieval_strategy == "Graph-RAG (Knowledge Graph + Vector Search)":
+            result = run_graph_rag_pipeline(
+                query=query,
+                enable_query_rewrite=enable_query_rewrite,
+                max_depth=graph_max_depth,
+                strategy=graph_strategy
+            )
+        else:
+            result = run_query_pipeline(
+                query=query,
+                enable_query_rewrite=enable_query_rewrite,
+                enable_multi_hop=enable_multi_hop,
+                enable_reasoning_chain=enable_reasoning_chain,
+                k=10
+            )
         
         if result:
             st.session_state["last_answer"] = result["answer"]
             st.session_state["last_docs"] = result["final_docs"]
             st.session_state["last_query"] = query
+            
+            # Store additional Graph-RAG info if available
+            if "graph_rag_result" in result:
+                st.session_state["graph_rag_result"] = result["graph_rag_result"]
+                st.session_state["anchor_nodes"] = result["anchor_nodes"]
+                st.session_state["total_nodes_visited"] = result["total_nodes_visited"]
             
             if "intent_info" in result:
                 st.session_state["intent_info"] = result["intent_info"]
@@ -331,6 +457,44 @@ if "last_answer" in st.session_state and "last_docs" in st.session_state:
     final_docs = st.session_state["last_docs"]
     last_query = st.session_state.get("last_query", "")
 
+    # Show Graph-RAG statistics if available
+    if "graph_rag_result" in st.session_state:
+        with st.expander("📊 Graph-RAG Statistics"):
+            stats = st.session_state.get("graph_rag_result").statistics
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric(
+                    "Anchor Nodes",
+                    stats.get("initial_vector_results", 0),
+                    help="Initial vector search results"
+                )
+            
+            with col2:
+                st.metric(
+                    "Graph Expanded",
+                    stats.get("total_nodes_visited", 0),
+                    help="Total nodes reached in graph traversal"
+                )
+            
+            with col3:
+                st.metric(
+                    "Max Depth",
+                    stats.get("max_depth_reached", 0),
+                    help="Maximum depth reached in graph traversal"
+                )
+            
+            with col4:
+                st.metric(
+                    "Final Results",
+                    stats.get("final_document_count", 0),
+                    help="Final deduplicated documents"
+                )
+            
+            st.markdown("**Traversal Details:**")
+            st.markdown(f"- Anchor nodes: {st.session_state.get('anchor_nodes', set())}")
+            st.markdown(f"- Edges traversed: {stats.get('edges_traversed', 0)}")
+    
     # Show reasoning trace if available
     if "reasoning_trace" in st.session_state:
         with st.expander("🧠 Reasoning Trace"):
@@ -396,3 +560,4 @@ if "last_answer" in st.session_state and "last_docs" in st.session_state:
                 st.code(segment_text, language=m.get("language") or "python")
             else:
                 st.info("Unable to load surrounding file segment.")
+

@@ -197,6 +197,9 @@ def ingest_repo(repo_url_or_path: str):
     # ========== BUILD & SAVE KNOWLEDGE GRAPH ==========
     print(f"\n📚 Building comprehensive knowledge graph...")
     
+    # ========== BUILD & SAVE KNOWLEDGE GRAPH ==========
+    print(f"\n📚 Building comprehensive knowledge graph...")
+    
     kg_builder.build_from_symbols(symbol_resolver.symbol_tables)
     print(f"✅ Added symbol nodes to knowledge graph")
     
@@ -204,27 +207,12 @@ def ingest_repo(repo_url_or_path: str):
     print(f"✅ Added data flow edges to knowledge graph")
     
     call_graph_for_kg = {caller: list(callees) for caller, callees in call_graph.items()}
-    kg_builder.add_call_graph_edges(call_graph_for_kg)
+    kg_builder.add_call_graph(call_graph_for_kg)
     print(f"✅ Added call graph edges to knowledge graph")
     
-    kg_builder.add_attribute_access_edges(symbol_resolver.symbol_tables)
-    print(f"✅ Added attribute access edges to knowledge graph")
-    
-    kg_builder.add_test_relationships(symbol_resolver.symbol_tables)
-    print(f"✅ Added test relationships to knowledge graph")
-    
-    kg_builder.add_override_relationships(symbol_resolver.symbol_tables)
-    print(f"✅ Added override relationships to knowledge graph")
-    
-    kg_builder.add_sibling_relationships(symbol_resolver.symbol_tables)
-    print(f"✅ Added sibling method relationships to knowledge graph")
-    
-    # Export knowledge graph
+    # Export knowledge graph to JSON
     kg_path = os.path.join(os.path.dirname(CALLGRAPH_PATH), "knowledge_graph.json")
-    kg_export = kg_builder.graph.export_to_dict()
-    
-    with open(kg_path, "w", encoding="utf-8") as f:
-        json.dump(kg_export, f, indent=2, ensure_ascii=False)
+    kg_builder.export(kg_path)
     
     print(f"\n📊 Knowledge Graph Statistics:")
     print(f"   Nodes: {len(kg_builder.graph.nodes)}")
@@ -238,8 +226,6 @@ def ingest_repo(repo_url_or_path: str):
     print(f"   Edge types:")
     for edge_type, count in sorted(edge_types.items()):
         print(f"      {edge_type}: {count}")
-    
-    print(f"📁 Saved knowledge graph to `{kg_path}`")
 
     # ========== BUILD & SAVE VECTOR STORE ==========
     embeddings = HuggingFaceEmbeddings(model_name=EMBED_MODEL)
@@ -256,3 +242,4 @@ def ingest_repo(repo_url_or_path: str):
 if __name__ == "__main__":
     repo_url = input("🔗 Enter GitHub repo URL or local path: ").strip()
     ingest_repo(repo_url)
+
