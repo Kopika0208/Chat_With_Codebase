@@ -355,44 +355,6 @@ class KnowledgeGraphBuilder:
     def get_graph(self) -> KnowledgeGraph:
         """Return the built knowledge graph."""
         return self.graph
-
-                                    target_id=attr_node_id,
-                                    edge_type="accesses_attribute",
-                                    properties={
-                                        "object": obj_name,
-                                        "attribute": attr_name,
-                                        "line": node.lineno,
-                                    }
-                                )
-                                self.builder.graph.add_edge(edge)
-                        
-                        self.generic_visit(node)
-                
-                visitor = AttributeVisitor(self, file_path)
-                visitor.visit(tree)
-            except Exception as e:
-                print(f"⚠️ Attribute access extraction failed for {file_path}: {e}")
-    
-    def add_test_relationships(self, symbol_tables: Dict[str, SymbolTable]) -> None:
-        """Identify test methods and link them to tested functions."""
-        test_pattern = re.compile(r'^test_', re.IGNORECASE)
-        
-        for file_path, symbol_table in symbol_tables.items():
-            for fqn, symbol in symbol_table.all_symbols.items():
-                if symbol.kind == "function" and test_pattern.match(symbol.name):
-                    # This is a test function
-                    func_name = symbol.name[5:] if symbol.name.startswith("test_") else symbol.name
-                    
-                    # Search for the function being tested
-                    for candidate_fqn, candidate_symbol in symbol_table.all_symbols.items():
-                        if candidate_symbol.kind in ("function", "method") and candidate_symbol.name == func_name:
-                            edge = KnowledgeGraphEdge(
-                                source_id=fqn,
-                                target_id=candidate_fqn,
-                                edge_type="tests",
-                                properties={"test_type": "unit_test"}
-                            )
-                            self.graph.add_edge(edge)
     
     def add_override_relationships(self, symbol_tables: Dict[str, SymbolTable]) -> None:
         """Detect method overrides in inheritance hierarchies."""
