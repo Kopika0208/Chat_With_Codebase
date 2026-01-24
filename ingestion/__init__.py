@@ -1,21 +1,41 @@
 # ingestion/__init__.py - Package initialization for ingestion modules
 
-from .ingest import (
-    ingest_repo,
-    VECTOR_DIR,
-    CALLGRAPH_PATH,
-    TARGET_REPO_DIR,
-    EXTENSIONS,
-    EMBED_MODEL,
-    PROJECT_ROOT,
-)
+# Try to import constants first, with fallback definitions if import fails
+try:
+    from .ingest import (
+        ingest_repo,
+        ingest_repos,
+        EXTENSIONS,
+        EMBED_MODEL,
+        PROJECT_ROOT,
+        VECTOR_DIR,
+        CALLGRAPH_PATH,
+        TARGET_REPO_DIR,
+        _get_repo_paths,
+    )
+except ImportError:
+    # Fallback: Define constants directly if import fails
+    import os
+    _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    VECTOR_DIR = os.path.join(_project_root, "data", "vector_store")
+    CALLGRAPH_PATH = os.path.join(_project_root, "data", "call_graph.json")
+    TARGET_REPO_DIR = os.path.join(_project_root, "repos", "myrepo")
+    PROJECT_ROOT = _project_root
+    EXTENSIONS = ('.py', '.js', '.java', '.ts', '.md', '.txt', '.go', '.cpp', '.c', '.h', '.rs')
+    EMBED_MODEL = "mixedbread-ai/mxbai-embed-large-v1"
+    # Functions will be None if import fails
+    ingest_repo = None
+    ingest_repos = None
+    _get_repo_paths = None
 
 __all__ = [
     'ingest_repo',
-    'VECTOR_DIR',
-    'CALLGRAPH_PATH',
-    'TARGET_REPO_DIR',
+    'ingest_repos',
     'EXTENSIONS',
     'EMBED_MODEL',
     'PROJECT_ROOT',
+    'VECTOR_DIR',
+    'CALLGRAPH_PATH',
+    'TARGET_REPO_DIR',
+    '_get_repo_paths',
 ]

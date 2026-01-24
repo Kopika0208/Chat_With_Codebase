@@ -10,9 +10,16 @@ def clone_or_open_repo(repo_url: str, target_dir: str) -> str:
     if repo_url.startswith("http"):
         if os.path.exists(target_dir):
             print("♻️ Repo exists — removing for fresh clone.")
-            os.system(f"rm -rf {target_dir}")
+            import shutil
+            shutil.rmtree(target_dir, ignore_errors=True)
         print(f"📥 Cloning {repo_url} → {target_dir}")
+        os.makedirs(os.path.dirname(target_dir), exist_ok=True)
         Repo.clone_from(repo_url, target_dir)
+    else:
+        # Local path - ensure it exists
+        if not os.path.exists(repo_url):
+            raise ValueError(f"Local repository path does not exist: {repo_url}")
+        target_dir = repo_url
     return os.path.abspath(target_dir)
 
 
