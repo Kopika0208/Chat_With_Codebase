@@ -45,9 +45,13 @@ def infer_metadata_filters_from_query(query: str) -> Dict:
     return filters
 
 
-def stage1_vector_search(query: str, k: int = 16) -> List[Tuple[Document, float]]:
+def stage1_vector_search(
+    query: str,
+    repo_name: str,                     # 🔁 CHANGED
+    k: int = 16
+) -> List[Tuple[Document, float]]:
     """Retriever 1: plain vector search (no filters)."""
-    vectorstore = get_vectorstore()
+    vectorstore = get_vectorstore(repo_name)   # 🔁 CHANGED
     docs_and_scores = vectorstore.similarity_search_with_score(query, k=k)
     print(
         f"🔎 Stage 1 – Vector search retrieved {len(docs_and_scores)} chunks for query: {query!r}"
@@ -55,8 +59,12 @@ def stage1_vector_search(query: str, k: int = 16) -> List[Tuple[Document, float]
     return docs_and_scores
 
 
-def hybrid_rerank(query: str, docs_and_scores: List[Tuple[Document, float]], 
-                  inferred_filters: Dict, top_k: int = 6) -> List[Document]:
+def hybrid_rerank(
+    query: str,
+    docs_and_scores: List[Tuple[Document, float]],
+    inferred_filters: Dict,
+    top_k: int = 6
+) -> List[Document]:
     """
     Hybrid reranking combining vector similarity, metadata, symbols, and path weighting.
     """
@@ -65,7 +73,7 @@ def hybrid_rerank(query: str, docs_and_scores: List[Tuple[Document, float]],
 
     embeddings = get_embeddings()
     q_tokens = set(re.findall(r"[a-zA-Z_]\w*", query.lower()))
-    
+
     try:
         q_vec = embeddings.embed_query(query)
         q_vec = np.array(q_vec, dtype=float)
@@ -78,11 +86,9 @@ def hybrid_rerank(query: str, docs_and_scores: List[Tuple[Document, float]],
     for doc, dist in docs_and_scores:
         meta = doc.metadata or {}
 
-        # 1) Base similarity from FAISS distance
         base_sim = 1.0 / (1.0 + float(dist))
         score = base_sim
 
-        # 2) Metadata matches
         lang_filter = inferred_filters.get("language")
         if lang_filter and (meta.get("language") or "").lower() == lang_filter:
             score += 0.4
@@ -100,7 +106,6 @@ def hybrid_rerank(query: str, docs_and_scores: List[Tuple[Document, float]],
         if path_filter and path_filter in path:
             score += 0.3
 
-        # 3) Symbol / parent_class in query
         symbol = (meta.get("symbol_name") or "").lower()
         if symbol and symbol in query.lower():
             score += 0.6
@@ -109,7 +114,6 @@ def hybrid_rerank(query: str, docs_and_scores: List[Tuple[Document, float]],
         if parent and parent in query.lower():
             score += 0.4
 
-        # 4) Code heuristics
         text_head = (doc.page_content or "")[:400].lower()
         full_text = doc.page_content or ""
 
@@ -122,11 +126,9 @@ def hybrid_rerank(query: str, docs_and_scores: List[Tuple[Document, float]],
         if "todo" in full_text.lower() or "fixme" in full_text.lower():
             score += 0.05
 
-        # Keywords from query in path
         if any(t in path for t in q_tokens):
             score += 0.2
 
-        # Path weighting (for MVC-ish repos)
         if any(seg in path for seg in ["views", "controllers", "routes", "api"]):
             score += 0.25
         if any(seg in path for seg in ["models", "schemas"]):
@@ -134,7 +136,6 @@ def hybrid_rerank(query: str, docs_and_scores: List[Tuple[Document, float]],
         if any(seg in path for seg in ["utils", "helpers", "lib"]):
             score += 0.15
 
-        # 5) Cosine similarity using embeddings
         if q_vec is not None:
             try:
                 d_vec = embeddings.embed_query(full_text[:1000])
@@ -156,8 +157,11 @@ def hybrid_rerank(query: str, docs_and_scores: List[Tuple[Document, float]],
     return top_docs
 
 
-def deduplicate_docs(docs: List[Document], semantic: bool = True, 
-                    threshold: float = 0.9) -> List[Document]:
+def deduplicate_docs(
+    docs: List[Document],
+    semantic: bool = True,
+    threshold: float = 0.9
+) -> List[Document]:
     """Remove duplicate chunks based on exact + optional semantic similarity."""
     if not docs:
         return docs
@@ -202,11 +206,14 @@ def deduplicate_docs(docs: List[Document], semantic: bool = True,
     return unique
 
 
-def get_expanded_context(docs: List[Document], repo_path: str, 
-                        window: int = 20) -> Dict[int, str]:
+def get_expanded_context(
+    docs: List[Document],
+    repo_path: str,
+    window: int = 20
+) -> Dict[int, str]:
     """Expand each doc with surrounding lines without mutating Document objects."""
     import os
-    
+
     expanded_map = {}
 
     for doc in docs:
@@ -233,8 +240,11 @@ def get_expanded_context(docs: List[Document], repo_path: str,
     return expanded_map
 
 
-def build_context_and_sources(docs: List[Document], expanded_map: Dict[int, str],
-                             max_chars_per_doc: int = 1200) -> Tuple[str, str]:
+def build_context_and_sources(
+    docs: List[Document],
+    expanded_map: Dict[int, str],
+    max_chars_per_doc: int = 1200
+) -> Tuple[str, str]:
     """Merge chunks + expanded context and build a sources string."""
     context_parts = []
     source_lines = []
@@ -260,11 +270,14 @@ def build_context_and_sources(docs: List[Document], expanded_map: Dict[int, str]
     return context_str, sources_str
 
 
-def build_followup_queries(original_query: str, seed_docs: List[Document],
-                          max_queries: int = 3) -> List[str]:
+def build_followup_queries(
+    original_query: str,
+    seed_docs: List[Document],
+    max_queries: int = 3
+) -> List[str]:
     """Build simple follow-up queries from top docs."""
     import os
-    
+
     followups = set()
 
     for d in seed_docs:
@@ -313,10 +326,16 @@ def build_followup_queries(original_query: str, seed_docs: List[Document],
     return trimmed
 
 
-def multi_hop_retrieve(query: str, inferred_filters: Dict, hops: int = 2,
-                      base_k: int = 16, top_k: int = 6) -> List[Document]:
+def multi_hop_retrieve(
+    query: str,
+    inferred_filters: Dict,
+    repo_name: str,                      # 🔁 CHANGED
+    hops: int = 2,
+    base_k: int = 16,
+    top_k: int = 6
+) -> List[Document]:
     """Two-hop retrieval: vector search + hybrid rerank, then follow-up queries."""
-    hop1_scores = stage1_vector_search(query, k=base_k)
+    hop1_scores = stage1_vector_search(query, repo_name, k=base_k)  # 🔁 CHANGED
     hop1_docs = hybrid_rerank(query, hop1_scores, inferred_filters, top_k=top_k)
 
     if hops <= 1 or not hop1_docs:
@@ -329,7 +348,7 @@ def multi_hop_retrieve(query: str, inferred_filters: Dict, hops: int = 2,
 
     all_scores = list(hop1_scores)
     for fq in followup_queries:
-        hop2_scores = stage1_vector_search(fq, k=12)
+        hop2_scores = stage1_vector_search(fq, repo_name, k=12)  # 🔁 CHANGED
         all_scores.extend(hop2_scores)
 
     combined_docs = hybrid_rerank(query, all_scores, inferred_filters, top_k=top_k)
@@ -348,38 +367,31 @@ def matched_terms_in_chunk(query: str, doc: Document) -> List[str]:
     return common[:10]
 
 
-def symbol_aware_retrieve(query: str, top_k: int = 6) -> List[Document]:
+def symbol_aware_retrieve(
+    query: str,
+    repo_name: str,                     # 🔁 CHANGED
+    top_k: int = 6
+) -> List[Document]:
     """
     High-level function combining vector search + symbol-driven ranking.
-    Uses symbol table and call graph to intelligently rank results.
-    
-    Flow:
-    1. Vector search for base candidates
-    2. Extract and match query keywords to symbols
-    3. Build candidate set from direct matches + call graph neighbors
-    4. Re-rank using: symbol_match + callgraph_distance + locality + embedding
-    5. Return top-k documents with direct implementations first
     """
-    from cache import load_symbol_table_cached, load_call_graph_cached, get_embeddings
+    from cache import load_symbol_table_cached, load_call_graph_cached
+
     try:
         from symbol_driven_ranking import symbol_driven_multi_rank
     except ImportError:
         print("⚠️ symbol_driven_ranking module not found. Falling back to standard retrieval.")
-        return multi_hop_retrieve(query, {}, hops=2, base_k=16, top_k=top_k)
-    
-    # Get raw vector candidates
-    vector_candidates = stage1_vector_search(query, k=16)
-    
+        return multi_hop_retrieve(query, {}, repo_name, hops=2, base_k=16, top_k=top_k)
+
+    vector_candidates = stage1_vector_search(query, repo_name, k=16)  # 🔁 CHANGED
     if not vector_candidates:
         print("⚠️ No vector candidates found")
         return []
-    
-    # Load knowledge bases
-    symbol_table = load_symbol_table_cached()
-    call_graph = load_call_graph_cached()
+
+    symbol_table = load_symbol_table_cached(repo_name)   # 🔁 CHANGED
+    call_graph = load_call_graph_cached(repo_name)       # 🔁 CHANGED
     embeddings = get_embeddings()
-    
-    # Apply symbol-driven ranking
+
     ranked_docs = symbol_driven_multi_rank(
         query=query,
         vector_candidates=vector_candidates,
@@ -389,5 +401,5 @@ def symbol_aware_retrieve(query: str, top_k: int = 6) -> List[Document]:
         top_k=top_k,
         verbose=True
     )
-    
+
     return ranked_docs

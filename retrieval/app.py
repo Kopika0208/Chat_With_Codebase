@@ -4,13 +4,26 @@ Main Streamlit application for Chat with Codebase.
 Handles UI, LLM integration, and orchestrates retrieval modules.
 """
 import sys, os
-
 # Force add project root (parent of retrieval/) to PYTHONPATH
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, PROJECT_ROOT)
 
 print("DEBUG: USING PROJECT ROOT =", PROJECT_ROOT)
 print("DEBUG: CURRENT WORKING DIRECTORY =", os.getcwd())
+
+# ===============================
+# 📂 MULTI-REPO SUPPORT
+# ===============================
+DATA_DIR = os.path.join(PROJECT_ROOT, "data")
+
+def list_ingested_repos():
+    """List all ingested repositories from the data directory."""
+    if not os.path.exists(DATA_DIR):
+        return []
+    return sorted(
+        d for d in os.listdir(DATA_DIR)
+        if os.path.isdir(os.path.join(DATA_DIR, d))
+    )
 
 import traceback
 import streamlit as st
@@ -40,7 +53,7 @@ from retrieval import (
     matched_terms_in_chunk,
     stage1_vector_search,
     hybrid_rerank,
-    symbol_aware_retrieve,  # Add to imports
+    symbol_aware_retrieve,
 )
 from utils import (
     rewrite_query_if_enabled,
@@ -57,7 +70,7 @@ from reasoning import get_reasoning_chain
 # ===============================
 load_dotenv()
 st.set_page_config(page_title="Chat with Your Codebase", layout="wide")
-st.title("💬 Chat with Your Codebase – Multi-Hop + Call Graph Visualization")
+st.title("💬 Chat with Your Codebase – Multi-Repo + Multi-Hop + Call Graph")
 
 LANGCHAIN_PROJECT = "chat-with-codebase"
 os.environ["LANGCHAIN_TRACING_V2"] = "true"
@@ -69,17 +82,12 @@ try:
 except Exception:
     print("⚠️ LangSmith inactive")
 
-DEFAULT_REPO_PATH = "repos/myrepo"
+# Initialize session state for multi-repo support
+if "active_repo" not in st.session_state:
+    st.session_state["active_repo"] = None
 
-# Load vectorstore
-try:
-    vectorstore = get_vectorstore()
-    print("✅ FAISS vectorstore loaded (cached)")
-except Exception:
-    vectorstore = None
-    print("⚠️ No FAISS index found yet. Ingest a repo first.")
-
-llm = get_llm()
+if "last_active_repo" not in st.session_state:
+    st.session_state["last_active_repo"] = None
 
 
 # ===============================
@@ -111,15 +119,66 @@ If you are uncertain or the context is insufficient, clearly say so and suggest 
 """
 )
 
+# ===============================
+# 📂 REPOSITORY SELECTION & MANAGEMENT
+# ===============================
+st.divider()
+st.subheader("📂 Repository Management")
+
+col1, col2 = st.columns([2, 1])
+
+with col1:
+    repos = list_ingested_repos()
+    
+    if not repos:
+        st.warning("ℹ️ No repositories ingested yet. Please ingest one below.")
+        active_repo = None
+    else:
+        active_repo = st.selectbox(
+            "Select a repository to work with:",
+            repos,
+            index=0,
+            key="active_repo_selector"
+        )
+        
+        if active_repo and st.session_state.get("last_active_repo") != active_repo:
+            st.session_state["last_active_repo"] = active_repo
+            # Clear repo-specific caches when switching repos
+            get_vectorstore.clear()
+            load_call_graph_cached.clear()
+            get_graph_rag_retriever.clear()
+            load_knowledge_graph_cached.clear()
+            load_graph_traversal_cached.clear()
+            load_symbol_table_cached.clear()
+            load_dataflow_data_cached.clear()
+            get_unified_retriever.clear()
+            # Clear previous QA results
+            for key in ["last_answer", "last_docs", "last_query"]:
+                st.session_state.pop(key, None)
+            st.rerun()
+        
+        st.session_state["active_repo"] = active_repo
+
+with col2:
+    st.markdown("**Ingested Repos:**")
+    st.markdown(f"**{len(repos)}** repo(s)")
 
 # ===============================
-# 📥 REPO INGESTION
+# 📥 REPO INGESTION SECTION
 # ===============================
+st.divider()
 st.subheader("📦 Ingest a New Repository")
 
-repo_url = st.text_input("🔗 Enter GitHub Repository URL or Local Path")
+ingest_col1, ingest_col2 = st.columns([3, 1])
 
-if st.button("🚀 Start Ingestion"):
+with ingest_col1:
+    repo_url = st.text_input("🔗 Enter GitHub Repository URL or Local Path")
+
+with ingest_col2:
+    st.write("")  # Spacing
+    ingest_button = st.button("🚀 Ingest", type="primary")
+
+if ingest_button:
     if not repo_url.strip():
         st.warning("⚠️ Please enter a repository URL or folder path.")
     else:
@@ -135,7 +194,7 @@ if st.button("🚀 Start Ingestion"):
                 )
             st.success("🎉 Ingestion complete!")
 
-            # Clear ALL repo-dependent caches so new data is picked up
+            # Clear ALL repo-dependent caches
             get_vectorstore.clear()
             load_call_graph_cached.clear()
             get_graph_rag_retriever.clear()
@@ -149,16 +208,31 @@ if st.button("🚀 Start Ingestion"):
             for key in ["last_answer", "last_docs", "last_query"]:
                 st.session_state.pop(key, None)
 
-            # Reload vectorstore
-            try:
-                vectorstore = get_vectorstore()
-                print("✅ FAISS reloaded after ingestion")
-            except Exception as e:
-                print(f"⚠️ Failed to reload FAISS after ingestion: {e}")
+            # Rerun to update repo list and auto-select new repo
+            st.rerun()
 
         except Exception as e:
             st.error(f"❌ Error during ingestion: {type(e).__name__}: {e}")
             st.text(traceback.format_exc())
+
+
+# ======================================================
+# ✅ ENSURE REPO IS SELECTED AND VECTORSTORE EXISTS
+# ======================================================
+if not active_repo:
+    st.info("ℹ️ Please select or ingest a repository to continue.")
+    st.stop()
+
+try:
+    vectorstore = get_vectorstore(active_repo)
+    print("✅ FAISS vectorstore loaded (cached)")
+except Exception as e:
+    vectorstore = None
+    print(f"⚠️ No FAISS index found for {active_repo}: {e}")
+    st.warning(f"⚠️ No FAISS index found. Please ensure the repository was ingested correctly.")
+    st.stop()
+
+llm = get_llm()
 
 
 # ======================================================
@@ -167,10 +241,10 @@ if st.button("🚀 Start Ingestion"):
 st.divider()
 st.subheader("📡 Call Graph Explorer")
 
-call_graph = load_call_graph_cached()
+call_graph = load_call_graph_cached(active_repo)
 
 if not call_graph:
-    st.info("ℹ️ No call graph available. Ingest a repository with Python functions first.")
+    st.info("ℹ️ No call graph available for this repository. Ingest a repository with Python functions first.")
 else:
     all_nodes = sorted(call_graph.keys())
     focus_symbol = st.selectbox(
@@ -187,17 +261,9 @@ else:
 
 
 # ======================================================
-# 📂 ENSURE VECTORSTORE EXISTS
-# ======================================================
-if vectorstore is None:
-    st.warning("⚠️ No FAISS index found. Please ingest a repository first.")
-    st.stop()
-
-
-# ======================================================
 # 🔌 QUERY PROCESSING PIPELINE
 # ======================================================
-def run_query_pipeline(query: str, enable_query_rewrite: bool, enable_multi_hop: bool,
+def run_query_pipeline(query: str, repo_name: str, enable_query_rewrite: bool, enable_multi_hop: bool,
                       enable_reasoning_chain: bool, k: int = 10) -> dict:
     """Execute the complete query pipeline."""
     
@@ -229,19 +295,19 @@ def run_query_pipeline(query: str, enable_query_rewrite: bool, enable_multi_hop:
         # 1️⃣ Infer metadata filters
         inferred_filters = infer_metadata_filters_from_query(query)
 
-        # 2️⃣ Retrieval (single-hop or multi-hop)
-                # 2️⃣ Retrieval (single-hop, multi-hop, or symbol-driven)
+        # 2️⃣ Retrieval (single-hop, multi-hop, or symbol-driven)
         if enable_multi_hop:
             # Use symbol-driven ranking for better results
             try:
-                candidate_docs = symbol_aware_retrieve(effective_query, top_k=8)
+                candidate_docs = symbol_aware_retrieve(effective_query, repo_name=repo_name, top_k=8)
+
             except Exception as e:
                 print(f"⚠️ Symbol-aware retrieval failed: {e}, falling back to multi-hop")
                 candidate_docs = multi_hop_retrieve(
-                    effective_query, inferred_filters, hops=2, base_k=16, top_k=8
+                    effective_query, inferred_filters, repo_name=repo_name, hops=2, base_k=16, top_k=8
                 )
         else:
-            scores = stage1_vector_search(effective_query, k=16)
+            scores = stage1_vector_search(effective_query, repo_name=repo_name, k=16)
             candidate_docs = hybrid_rerank(effective_query, scores, inferred_filters, top_k=8)
 
         # 3️⃣ Deduplicate
@@ -257,7 +323,10 @@ def run_query_pipeline(query: str, enable_query_rewrite: bool, enable_multi_hop:
             return None
 
         # 5️⃣ Build context and answer
-        expanded_map = get_expanded_context(final_docs, repo_path=DEFAULT_REPO_PATH)
+        expanded_map = get_expanded_context(
+            final_docs,
+            repo_path=os.path.join("repos", repo_name)
+        )
         context_str, sources_str = build_context_and_sources(final_docs, expanded_map)
 
         # 6️⃣ Get LLM answer
@@ -329,12 +398,12 @@ run_query = st.button("🚀 Run Query", type="primary")
 # ======================================================
 # 🚀 GRAPH-RAG QUERY PIPELINE
 # ======================================================
-def run_graph_rag_pipeline(query: str, enable_query_rewrite: bool, max_depth: int, 
+def run_graph_rag_pipeline(query: str, repo_name: str, enable_query_rewrite: bool, max_depth: int, 
                           strategy: str) -> dict:
     """Execute Graph-RAG query pipeline."""
     try:
         print("[App] Initializing Graph-RAG retriever...")
-        retriever = get_graph_rag_retriever()
+        retriever = get_graph_rag_retriever(repo_name)
         if not retriever:
             st.error("❌ Failed to initialize Graph-RAG retriever. Check console for details.")
             return None
@@ -417,6 +486,7 @@ if run_query and query:
         if retrieval_strategy == "Graph-RAG (Knowledge Graph + Vector Search)":
             result = run_graph_rag_pipeline(
                 query=query,
+                repo_name=active_repo,
                 enable_query_rewrite=enable_query_rewrite,
                 max_depth=graph_max_depth,
                 strategy=graph_strategy
@@ -424,6 +494,7 @@ if run_query and query:
         else:
             result = run_query_pipeline(
                 query=query,
+                repo_name=active_repo,
                 enable_query_rewrite=enable_query_rewrite,
                 enable_multi_hop=enable_multi_hop,
                 enable_reasoning_chain=enable_reasoning_chain,
@@ -553,11 +624,16 @@ if "last_answer" in st.session_state and "last_docs" in st.session_state:
 
         # View surrounding code
         with st.expander("👁 View surrounding code"):
-            seg = load_file_segment(m, repo_path=DEFAULT_REPO_PATH, padding=20)
+            seg = load_file_segment(
+                m,
+                repo_path=os.path.join("repos", active_repo),
+                padding=20
+            )
             if seg is not None:
                 segment_text, seg_start, seg_end = seg
                 st.markdown(f"_Showing lines {seg_start}–{seg_end} from `{path}`_")
                 st.code(segment_text, language=m.get("language") or "python")
             else:
                 st.info("Unable to load surrounding file segment.")
+
 

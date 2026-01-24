@@ -46,7 +46,6 @@ REASONING: [brief explanation]
             response = self.llm.invoke(prompt_text)
             text = response.content.strip()
             
-            # Parse response
             intent_type = "code_search"
             confidence = 0.5
             keywords = []
@@ -107,9 +106,21 @@ Be specific and include all reasonable interpretations.
             
             for line in text.split("\n"):
                 if line.startswith("MENTIONED:"):
-                    mentioned = [s.strip() for s in line.replace("MENTIONED:", "").strip("[]").split(",") if s.strip()]
+                    mentioned = [
+                        s.strip()
+                        for s in line.replace("MENTIONED:", "")
+                        .strip("[]")
+                        .split(",")
+                        if s.strip()
+                    ]
                 elif line.startswith("INFERRED:"):
-                    inferred = [s.strip() for s in line.replace("INFERRED:", "").strip("[]").split(",") if s.strip()]
+                    inferred = [
+                        s.strip()
+                        for s in line.replace("INFERRED:", "")
+                        .strip("[]")
+                        .split(",")
+                        if s.strip()
+                    ]
                 elif line.startswith("TYPES:"):
                     for pair in line.replace("TYPES:", "").strip("[]").split(","):
                         if ":" in pair:
@@ -135,23 +146,28 @@ Be specific and include all reasonable interpretations.
         """Retrieve code using initial vector search + graph walking."""
         print("🔎 Step 3: Retrieving with graph walk...")
         inferred_filters = infer_metadata_filters_from_query(query)
-        base_docs = multi_hop_retrieve(query, inferred_filters, hops=2, base_k=16, top_k=8)
+        base_docs = multi_hop_retrieve(
+            query, inferred_filters, hops=2, base_k=16, top_k=8
+        )
         
         retrieved = list(base_docs)
         
-        # If graph retriever available, expand via graph
         if self.graph_retriever:
             try:
                 for doc in list(base_docs)[:5]:
-                    expanded = self.graph_retriever.retrieve_graph_aware(doc, include_related=True)
+                    expanded = self.graph_retriever.retrieve_graph_aware(
+                        doc, include_related=True
+                    )
                     for expanded_doc in expanded:
                         if expanded_doc not in retrieved:
                             retrieved.append(expanded_doc)
             except Exception as e:
                 print(f"⚠️ Graph-aware expansion failed: {e}")
         
-        # Expand based on identified symbols
-        for symbol in (symbols.get("mentioned_symbols", []) + symbols.get("inferred_symbols", []))[:5]:
+        for symbol in (
+            symbols.get("mentioned_symbols", [])
+            + symbols.get("inferred_symbols", [])
+        )[:5]:
             try:
                 sym_docs = self.vectorstore.similarity_search(symbol, k=3)
                 for doc in sym_docs:
@@ -175,17 +191,19 @@ Be specific and include all reasonable interpretations.
                 meta = doc.metadata or {}
                 node_type = meta.get("node_type", "")
                 
-                # If method, get sibling methods
                 if node_type == "method":
-                    related = self.graph_retriever.retrieve_graph_aware(doc, include_related=True)
+                    related = self.graph_retriever.retrieve_graph_aware(
+                        doc, include_related=True
+                    )
                     for rel_doc in related:
                         if rel_doc not in enhanced:
                             enhanced.append(rel_doc)
                 
-                # If in a class, get class definition
                 parent_class = meta.get("parent_class")
                 if parent_class:
-                    class_docs = self.vectorstore.similarity_search(parent_class, k=2)
+                    class_docs = self.vectorstore.similarity_search(
+                        parent_class, k=2
+                    )
                     for class_doc in class_docs:
                         if class_doc not in enhanced:
                             enhanced.append(class_doc)
@@ -204,7 +222,6 @@ Be specific and include all reasonable interpretations.
         max_context_chars: int = 12000
     ) -> str:
         """Synthesize final answer using all context."""
-        # Build context
         context_parts = []
         total_chars = 0
         
@@ -224,7 +241,6 @@ Be specific and include all reasonable interpretations.
         
         context = "\n---\n".join(context_parts)
         
-        # Build synthesis prompt
         prompt_text = f"""
 Based on the following codebase context, answer this question:
 
@@ -245,11 +261,9 @@ Provide a comprehensive answer that:
 
 Answer:
 """
-        
         try:
             response = self.llm.invoke(prompt_text)
-            answer = response.content.strip()
-            return answer
+            return response.content.strip()
         except Exception as e:
             print(f"⚠️ Answer synthesis failed: {e}")
             return f"Error generating answer: {e}"
@@ -258,35 +272,20 @@ Answer:
         """Execute full multi-step reasoning chain."""
         reasoning_trace = []
         
-        # Step 1: Classify intent
-        print("\n🧠 Step 1: Classifying intent...")
         reasoning_trace.append("Step 1: Intent Classification")
         intent = self.step1_classify_intent(query)
-        reasoning_trace.append(f"  Intent: {intent['intent_type']} (confidence: {intent['confidence']:.2f})")
         
-        # Step 2: Identify symbols
-        print("🧠 Step 2: Identifying symbols...")
         reasoning_trace.append("Step 2: Symbol Identification")
         symbols = self.step2_identify_symbols(query, intent)
-        reasoning_trace.append(f"  Found: {len(symbols['mentioned_symbols'])} mentioned, {len(symbols['inferred_symbols'])} inferred")
         
-        # Step 3: Retrieve with graph walk
-        print("🧠 Step 3: Graph-aware retrieval...")
         reasoning_trace.append("Step 3: Graph-Aware Retrieval")
         retrieved = self.step3_retrieve_with_graph_walk(query, symbols, intent)
-        reasoning_trace.append(f"  Retrieved: {len(retrieved)} chunks")
         
-        # Step 4: Add sibling context
-        print("🧠 Step 4: Adding sibling context...")
         reasoning_trace.append("Step 4: Sibling Context")
         enhanced = self.step4_retrieve_sibling_context(retrieved)
-        reasoning_trace.append(f"  Enhanced: {len(enhanced)} chunks total")
         
-        # Step 5: Synthesize answer
-        print("🧠 Step 5: Synthesizing answer...")
         reasoning_trace.append("Step 5: Answer Synthesis")
         answer = self.step5_synthesize_answer(query, intent, symbols, enhanced)
-        reasoning_trace.append(f"  Generated answer ({len(answer)} chars)")
         
         return {
             "question": query,
@@ -300,16 +299,16 @@ Answer:
 
 
 @st.cache_resource(show_spinner=False)
-def get_reasoning_chain():
+def get_reasoning_chain(repo_name: str):  # 🔁 CHANGED
     """Initialize multi-step reasoning chain."""
     try:
         llm = get_llm()
-        vectorstore = get_vectorstore()
-        graph_retriever = get_graph_aware_retriever()
+        vectorstore = get_vectorstore(repo_name)  # 🔁 CHANGED
+        graph_retriever = get_graph_aware_retriever(repo_name)  # 🔁 CHANGED
         
         import cache as cache_module
-        kg = cache_module.load_knowledge_graph_cached()
-        call_graph = cache_module.load_call_graph_cached()
+        kg = cache_module.load_knowledge_graph_cached(repo_name)  # 🔁 CHANGED
+        call_graph = cache_module.load_call_graph_cached(repo_name)  # 🔁 CHANGED
         
         chain = MultiStepReasoningChain(
             llm=llm,
@@ -318,7 +317,7 @@ def get_reasoning_chain():
             kg=kg,
             call_graph=call_graph
         )
-        print("✅ Multi-step reasoning chain initialized")
+        print(f"✅ Multi-step reasoning chain initialized for {repo_name}")
         return chain
     except Exception as e:
         print(f"⚠️ Failed to initialize reasoning chain: {e}")
