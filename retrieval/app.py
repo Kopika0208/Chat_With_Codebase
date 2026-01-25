@@ -74,6 +74,7 @@ from onboarding import (
     render_weak_documentation_section,
     render_summary,
 )
+from code_health.visualization import render_code_health_tab
 
 # ===============================
 # ⚙️ SETUP
@@ -300,6 +301,7 @@ try:
         "🌳 File Structure",
         "🧭 Navigation",
         "📝 Documentation",
+        "💪 Code Health",
     ])
     
     with onboarding_tabs[0]:  # Overview Tab
@@ -350,6 +352,16 @@ try:
     with onboarding_tabs[5]:  # Documentation Tab
         weak_docs = analyzer.get_files_with_weak_docs()
         render_weak_documentation_section(weak_docs, llm, analyzer)
+    
+    with onboarding_tabs[6]:  # Code Health & Quality Tab
+        try:
+            # Get the actual repo path from repos or data directory
+            repo_source_path = os.path.join("repos", active_repo) if os.path.exists(os.path.join("repos", active_repo)) else os.path.join("data", active_repo)
+            render_code_health_tab(repo_source_path, call_graph, symbol_table)
+        except Exception as e:
+            st.error(f"[ERROR] Error loading Code Health analysis: {type(e).__name__}: {e}")
+            print(f"Debug - repo_source_path: {repo_source_path}")
+            print(traceback.format_exc())
 
 except Exception as e:
     st.error(f"❌ Error initializing onboarding module: {type(e).__name__}: {e}")
