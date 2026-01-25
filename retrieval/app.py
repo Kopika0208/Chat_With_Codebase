@@ -64,6 +64,16 @@ from utils import (
 )
 from graph import render_call_graph
 from reasoning import get_reasoning_chain
+from onboarding import (
+    CodebaseAnalyzer,
+    render_project_overview,
+    render_entry_exit_points,
+    render_roadmap,
+    render_file_tree,
+    render_navigation_hints,
+    render_weak_documentation_section,
+    render_summary,
+)
 
 # ===============================
 # ⚙️ SETUP
@@ -258,6 +268,92 @@ else:
         focus_symbol = None
 
     render_call_graph(call_graph, focus_symbol=focus_symbol, max_depth=2)
+
+
+# ======================================================
+# 📚 ONBOARDING & DOCUMENTATION TAB
+# ======================================================
+st.divider()
+st.subheader("📚 Onboarding & Documentation")
+
+# Initialize analyzer
+try:
+    symbol_table = load_symbol_table_cached(active_repo)
+    knowledge_graph = load_knowledge_graph_cached(active_repo)
+    dataflow_data = load_dataflow_data_cached(active_repo)
+    
+    analyzer = CodebaseAnalyzer(
+        call_graph=call_graph,
+        symbol_table=symbol_table,
+        repo_path=os.path.join("data", active_repo),
+        root_dir=os.path.join("repos", active_repo) if os.path.exists(os.path.join("repos", active_repo)) else "",
+        vectorstore=vectorstore,  # For file discovery and metadata extraction
+        knowledge_graph=knowledge_graph,  # Semantic relationships between symbols
+        dataflow_data=dataflow_data  # Data flow dependencies
+    )
+    
+    # Create tabs for onboarding features
+    onboarding_tabs = st.tabs([
+        "📊 Overview",
+        "🚀 Entry/Exit Points",
+        "🗺️ Roadmap",
+        "🌳 File Structure",
+        "🧭 Navigation",
+        "📝 Documentation",
+    ])
+    
+    with onboarding_tabs[0]:  # Overview Tab
+        st.markdown("### Project Summary & Statistics")
+        stats = analyzer.get_project_stats()
+        
+        # Try to generate enhanced summary
+        try:
+            summary = analyzer.generate_project_summary(llm=llm)
+            render_summary(summary)
+        except Exception as e:
+            print(f"⚠️ Summary generation failed: {e}")
+        
+        st.divider()
+        render_project_overview(stats)
+    
+    with onboarding_tabs[1]:  # Entry/Exit Points Tab
+        entry_points = analyzer.get_entry_points()
+        exit_points = analyzer.get_exit_points()
+        render_entry_exit_points(entry_points, exit_points)
+    
+    with onboarding_tabs[2]:  # Roadmap Tab
+        roadmap = analyzer.get_dependency_order()
+        render_roadmap(roadmap)
+    
+    with onboarding_tabs[3]:  # File Structure Tab
+        file_tree = analyzer.get_file_tree()
+        render_file_tree(file_tree)
+    
+    with onboarding_tabs[4]:  # Navigation Tab
+        st.markdown("### Navigate Code Relationships")
+        
+        # Get all unique symbols for selection
+        all_symbols = sorted(analyzer.symbol_table.keys())
+        
+        if all_symbols:
+            selected_symbol = st.selectbox(
+                "Select a symbol to explore:",
+                all_symbols,
+                key="navigation_symbol_selector"
+            )
+            
+            if selected_symbol:
+                render_navigation_hints(analyzer, selected_symbol)
+        else:
+            st.info("No symbols found in this repository.")
+    
+    with onboarding_tabs[5]:  # Documentation Tab
+        weak_docs = analyzer.get_files_with_weak_docs()
+        render_weak_documentation_section(weak_docs, llm, analyzer)
+
+except Exception as e:
+    st.error(f"❌ Error initializing onboarding module: {type(e).__name__}: {e}")
+    print(traceback.format_exc())
 
 
 # ======================================================
