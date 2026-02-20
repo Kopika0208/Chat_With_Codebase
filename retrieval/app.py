@@ -466,34 +466,11 @@ def run_query_pipeline(query: str, repo_name: str, enable_query_rewrite: bool, e
 st.divider()
 st.subheader("💡 Ask Questions About Your Codebase")
 
-# Retrieval strategy selection
-retrieval_strategy = st.radio(
-    "🔄 Choose retrieval strategy:",
-    ["Semantic + Multi-hop", "Graph-RAG (Knowledge Graph + Vector Search)"],
-    help="Semantic: Traditional vector search with call graph. Graph-RAG: Knowledge graph with intelligent expansion.",
-)
-
-enable_query_rewrite = st.checkbox(
-    "✏️ Enable smart query rewriting (improves search)",
-    value=True,
-)
-
-if retrieval_strategy == "Graph-RAG (Knowledge Graph + Vector Search)":
-    col1, col2 = st.columns(2)
-    with col1:
-        graph_max_depth = st.slider("📊 Graph traversal depth:", 1, 4, 2)
-    with col2:
-        graph_strategy = st.selectbox("📈 Traversal strategy:", ["bfs", "dfs"])
-else:
-    enable_multi_hop = st.checkbox(
-        "🔁 Enable multi-hop retrieval (follow related files/symbols)",
-        value=True,
-    )
-    
-    enable_reasoning_chain = st.checkbox(
-        "🧠 Enable multi-step reasoning chain (advanced reasoning)",
-        value=False,
-    )
+# Set default values for Graph-RAG pipeline
+retrieval_strategy = "Graph-RAG (Knowledge Graph + Vector Search)"
+enable_query_rewrite = True
+graph_max_depth = 4
+graph_strategy = "dfs"
 
 query = st.text_input(
     "🔍 Your question (e.g., 'Where is judgment prediction implemented?'):",
@@ -591,23 +568,13 @@ def run_graph_rag_pipeline(query: str, repo_name: str, enable_query_rewrite: boo
 
 if run_query and query:
     with st.spinner("🔎 Processing your query..."):
-        if retrieval_strategy == "Graph-RAG (Knowledge Graph + Vector Search)":
-            result = run_graph_rag_pipeline(
-                query=query,
-                repo_name=active_repo,
-                enable_query_rewrite=enable_query_rewrite,
-                max_depth=graph_max_depth,
-                strategy=graph_strategy
-            )
-        else:
-            result = run_query_pipeline(
-                query=query,
-                repo_name=active_repo,
-                enable_query_rewrite=enable_query_rewrite,
-                enable_multi_hop=enable_multi_hop,
-                enable_reasoning_chain=enable_reasoning_chain,
-                k=10
-            )
+        result = run_graph_rag_pipeline(
+            query=query,
+            repo_name=active_repo,
+            enable_query_rewrite=enable_query_rewrite,
+            max_depth=graph_max_depth,
+            strategy=graph_strategy
+        )
         
         if result:
             st.session_state["last_answer"] = result["answer"]
@@ -619,13 +586,6 @@ if run_query and query:
                 st.session_state["graph_rag_result"] = result["graph_rag_result"]
                 st.session_state["anchor_nodes"] = result["anchor_nodes"]
                 st.session_state["total_nodes_visited"] = result["total_nodes_visited"]
-            
-            if "intent_info" in result:
-                st.session_state["intent_info"] = result["intent_info"]
-            if "symbols_info" in result:
-                st.session_state["symbols_info"] = result["symbols_info"]
-            if "reasoning_trace" in result:
-                st.session_state["reasoning_trace"] = result["reasoning_trace"]
 
 
 # ======================================================
