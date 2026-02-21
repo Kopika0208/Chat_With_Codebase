@@ -67,6 +67,7 @@ try:
     from .callgraph import extract_python_calls, extract_js_ts_calls
     from .resolver import SymbolResolver
     from .utils import clone_or_open_repo, list_repo_files, get_commit_info
+    from .contributions import extract_contributions
 except ImportError as e:
     # If imports fail, at least constants are available
     print(f"Warning: Some ingestion modules failed to import: {e}")
@@ -82,6 +83,7 @@ except ImportError as e:
     clone_or_open_repo = None
     list_repo_files = None
     get_commit_info = None
+    extract_contributions = None
 
 
 # ===============================
@@ -265,6 +267,16 @@ def ingest_repo(repo_url_or_path: str, repo_name: str = None, return_data: bool 
     for edge_type, count in sorted(edge_types.items()):
         print(f"      {edge_type}: {count}")
 
+    # ========== EXTRACT CONTRIBUTIONS ==========
+    contributions_data = {}
+    if extract_contributions:
+        print(f"\n👥 Analyzing code contributions and commit history...")
+        try:
+            contributions_data = extract_contributions(repo_path)
+            print(f"✅ Extracted contributions from {contributions_data.get('total_authors', 0)} authors")
+        except Exception as e:
+            print(f"⚠️ Failed to extract contributions: {e}")
+
     # ========== BUILD VECTOR STORE ==========
     embeddings = HuggingFaceEmbeddings(model_name=EMBED_MODEL)
     vectorstore = FAISS.from_documents(documents, embeddings)
@@ -278,6 +290,7 @@ def ingest_repo(repo_url_or_path: str, repo_name: str = None, return_data: bool 
             "dataflow_by_file": dataflow_by_file,
             "kg_builder": kg_builder,
             "vectorstore": vectorstore,
+            "contributions": contributions_data,
             "repo_name": repo_name,
         }
     
@@ -326,6 +339,13 @@ def ingest_repo(repo_url_or_path: str, repo_name: str = None, return_data: bool 
     kg_path = os.path.join(paths["data_dir"], "knowledge_graph.json")
     kg_builder.export(kg_path)
 
+    # Save contributions data
+    if contributions_data:
+        contributions_path = os.path.join(paths["data_dir"], "contributions.json")
+        with open(contributions_path, "w", encoding="utf-8") as f:
+            json.dump(contributions_data, f, indent=2, ensure_ascii=False, default=str)
+        print(f"👥 Saved contributions data to `{contributions_path}`")
+
     # Save vector store
     os.makedirs(paths["vector_dir"], exist_ok=True)
     vectorstore.save_local(paths["vector_dir"])
@@ -352,6 +372,7 @@ def ingest_repos(repo_list: list, aggregate: bool = True):
     all_dataflow = {}
     all_kg_builders = []
     all_vectorstores = []
+    all_contributions = {}
     repo_names = []
     
     # Process each repository
@@ -375,6 +396,8 @@ def ingest_repos(repo_list: list, aggregate: bool = True):
             all_dataflow.update(result["dataflow_by_file"])
             all_kg_builders.append(result["kg_builder"])
             all_vectorstores.append(result["vectorstore"])
+            if result.get("contributions"):
+                all_contributions[result["repo_name"]] = result["contributions"]
             repo_names.append(result["repo_name"])
     
     if not aggregate:
@@ -451,11 +474,13 @@ def ingest_repos(repo_list: list, aggregate: bool = True):
     aggregated_kg.export(kg_path)
     print(f"📚 Saved aggregated knowledge graph with {len(aggregated_kg.graph.nodes)} nodes and {len(aggregated_kg.graph.edges)} edges.")
     
-    # Save aggregated vector store
-    os.makedirs(aggregated_paths["vector_dir"], exist_ok=True)
-    merged_vectorstore.save_local(aggregated_paths["vector_dir"])
-    print(f"💾 Saved aggregated FAISS vector store with {len(all_documents)} documents.")
-    
+    # Save aggregated contributions
+    if all_contributions:
+        contributions_path = os.path.join(aggregated_paths["data_dir"], "contributions.json")
+        with open(contributions_path, "w", encoding="utf-8") as f:
+            json.dump(all_contributions, f, indent=2, ensure_ascii=False, default=str)
+        print(f"👥 Saved aggregated contributions data from {len(all_contributions)} repositories.")
+
     print(f"\n✅ Successfully aggregated {len(repo_list)} repositories!")
     return {
         "repos": repo_names,

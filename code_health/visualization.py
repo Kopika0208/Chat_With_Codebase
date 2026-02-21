@@ -7,6 +7,8 @@ import json
 import pandas as pd
 from typing import Dict, List
 from code_health import CodeStatistics, HealthScoreCalculator, CodeSmellDetector, RefactoringAdvisor
+from code_health.enhanced_analysis import EnhancedHealthAnalyzer
+from code_health.enhanced_refactoring import EnhancedRefactoringAdvisor
 
 
 def render_code_health_tab(repo_path: str, call_graph: Dict, symbol_table: Dict) -> None:
@@ -95,6 +97,176 @@ def render_code_health_tab(repo_path: str, call_graph: Dict, symbol_table: Dict)
     
     with col3:
         st.metric("Refactoring Suggestions", int(len(suggestions)))
+    
+    # ============================================================
+    # ENHANCED ANALYSIS WITH DETAILED METRICS
+    # ============================================================
+    st.divider()
+    st.markdown("### 📊 Enhanced Analysis Report")
+    
+    # Use enhanced analyzer for deeper insights
+    enhanced_analyzer = EnhancedHealthAnalyzer(stats, call_graph, normalized_symbol_table)
+    detailed_report = enhanced_analyzer.get_detailed_health_report()
+    
+    # Display enhanced summary
+    if detailed_report.get('summary'):
+        summary = detailed_report['summary']
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric("Enhanced Score", f"{summary.get('health_score', 0):.1f}/100")
+        with col2:
+            st.metric("Status", summary.get('status', 'Unknown'))
+        with col3:
+            st.metric("Total Functions", summary.get('total_functions', 0))
+        with col4:
+            st.metric("Avg Complexity", f"{summary.get('avg_complexity', 0):.2f}")
+    
+    # Display dimension analysis
+    if detailed_report.get('dimension_analysis'):
+        st.markdown("#### Health Dimensions Analysis")
+        
+        dims = detailed_report['dimension_analysis']
+        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+            "Complexity",
+            "Size", 
+            "Documentation",
+            "Dependencies",
+            "Testing",
+            "Duplication"
+        ])
+        
+        with tab1:
+            if dims.get('complexity'):
+                c = dims['complexity']
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Average CC", f"{c.get('average', 0):.2f}")
+                with col2:
+                    st.metric("Max CC", c.get('max', 0))
+                with col3:
+                    st.metric("Std Dev", f"{c.get('std_dev', 0):.2f}")
+                with col4:
+                    st.metric("High-Risk Files", c.get('high_complexity_files', 0))
+                
+                st.progress(min(c.get('score', 0) / 100, 1.0))
+                st.caption(f"Complexity Score: {c.get('score', 0):.0f}/100")
+        
+        with tab2:
+            if dims.get('size'):
+                s = dims['size']
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Total LOC", s.get('total_loc', 0))
+                with col2:
+                    st.metric("Avg File LOC", f"{s.get('avg_file_loc', 0):.0f}")
+                with col3:
+                    st.metric("Large Files (>500)", s.get('large_files', 0))
+                with col4:
+                    st.metric("Very Large (>1000)", s.get('very_large_files', 0))
+                
+                st.progress(min(s.get('score', 0) / 100, 1.0))
+                st.caption(f"Size Score: {s.get('score', 0):.0f}/100")
+        
+        with tab3:
+            if dims.get('documentation'):
+                d = dims['documentation']
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Doc Coverage", f"{d.get('avg_docstring_coverage', 0):.1f}%")
+                with col2:
+                    st.metric("Comment Ratio", f"{d.get('comment_ratio', 0):.3f}")
+                with col3:
+                    st.metric("Poor Doc Files", d.get('files_with_poor_docs', 0))
+                with col4:
+                    st.metric("No Docs", d.get('files_with_no_docs', 0))
+                
+                st.progress(min(d.get('score', 0) / 100, 1.0))
+                st.caption(f"Documentation Score: {d.get('score', 0):.0f}/100")
+        
+        with tab4:
+            if dims.get('dependencies'):
+                dp = dims['dependencies']
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Avg Fan-In", f"{dp.get('avg_fan_in', 0):.2f}")
+                with col2:
+                    st.metric("Avg Fan-Out", f"{dp.get('avg_fan_out', 0):.2f}")
+                with col3:
+                    st.metric("Max Fan-In", dp.get('max_fan_in', 0))
+                with col4:
+                    st.metric("High Coupling", dp.get('high_coupling_items', 0))
+                
+                st.progress(min(dp.get('score', 0) / 100, 1.0))
+                st.caption(f"Dependency Score: {dp.get('score', 0):.0f}/100")
+        
+        with tab5:
+            if dims.get('testing'):
+                t = dims['testing']
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Test Paths", t.get('estimated_test_paths', 0))
+                with col2:
+                    st.metric("Easily Testable", t.get('easily_testable_files', 0))
+                with col3:
+                    st.metric("Hard to Test", t.get('hard_to_test_files', 0))
+        
+        with tab6:
+            if dims.get('duplication'):
+                dup = dims['duplication']
+                st.metric("Potential Duplicates", dup.get('potential_duplicate_functions', 0))
+                st.markdown(f"**Risk Level:** {dup.get('duplication_risk', 'unknown').upper()}")
+    
+    # Display quality indicators
+    if detailed_report.get('quality_indicators'):
+        st.markdown("#### Quality Indicators")
+        
+        qi = detailed_report['quality_indicators']
+        col1, col2 = st.columns([2, 1])
+        
+        with col1:
+            st.markdown(f"**Maintainability Index:** {qi.get('maintainability_index', 0):.1f}/100")
+            st.markdown(f"**Technical Debt:** {qi.get('technical_debt_estimate', 'Unknown')}")
+            
+            st.markdown("**Priority Refactoring Areas:**")
+            for idx, item in enumerate(qi.get('refactoring_priority', []), 1):
+                st.markdown(f"- {item}")
+        
+        with col2:
+            pass  # Space for future content
+    
+    # Display file distribution
+    if detailed_report.get('file_breakdown'):
+        st.markdown("#### File Distribution")
+        
+        fb = detailed_report['file_breakdown']
+        if fb.get('top_5_largest'):
+            st.markdown("**Top 5 Largest Files:**")
+            
+            for i, file_info in enumerate(fb['top_5_largest'], 1):
+                st.markdown(f"{i}. **{file_info['file']}** - {file_info['loc']} LOC ({file_info['functions']} functions)")
+        
+        if fb.get('loc_distribution'):
+            dist = fb['loc_distribution']
+            dist_data = {
+                'Size': ['Tiny (<50)', 'Small (50-150)', 'Medium (150-300)', 'Large (300-500)', 'Very Large (>500)'],
+                'Count': [dist['tiny'], dist['small'], dist['medium'], dist['large'], dist['very_large']],
+            }
+            
+            st.bar_chart(pd.DataFrame(dist_data).set_index('Size'))
+    
+    # Display risk areas
+    if detailed_report.get('risk_areas'):
+        st.markdown("#### Identified Risk Areas")
+        
+        risk_areas = detailed_report['risk_areas'][:10]  # Top 10
+        
+        for area in risk_areas:
+            with st.expander(f"🚨 {area['file']} (Risk: {area['risk_score']:.0f}/100)"):
+                st.write("**Issues:**")
+                for reason in area['reasons']:
+                    st.write(f"- {reason}")
     
     # ============================================================
     # DIMENSION SCORES
@@ -276,54 +448,112 @@ def render_code_health_tab(repo_path: str, call_graph: Dict, symbol_table: Dict)
     # REFACTORING SUGGESTIONS
     # ============================================================
     st.divider()
-    st.markdown("### 🔨 Refactoring Suggestions")
+    st.markdown("### 🔨 Detailed Refactoring Suggestions")
     
-    if suggestions:
-        # Sort by priority
-        for i, suggestion in enumerate(suggestions, 1):
-            smell_type = suggestion['smell_type']
-            file = suggestion['file']
-            priority = suggestion['priority'].upper()
-            effort = suggestion['effort'].upper()
+    # Generate enhanced refactoring suggestions
+    enhanced_advisor = EnhancedRefactoringAdvisor(enhanced_analyzer, smells, stats)
+    enhanced_suggestions = enhanced_advisor.generate_enhanced_suggestions()
+    
+    if enhanced_suggestions:
+        for i, suggestion in enumerate(enhanced_suggestions, 1):
+            smell_type = suggestion.get('smell_type', 'Unknown')
+            file = suggestion.get('file', 'Unknown')
+            severity = suggestion.get('severity', 'medium').upper()
+            effort = suggestion.get('effort', 'medium').upper()
+            impact = suggestion.get('impact_score', 50)
+            time_estimate = suggestion.get('estimated_time', 'Unknown')
             
-            with st.expander(f"#{i} {smell_type} — {file}"):
-                # Header info
-                col1, col2, col3 = st.columns(3)
+            # Create colored header based on severity
+            if severity == 'HIGH':
+                header_color = "🔴"
+            elif severity == 'MEDIUM':
+                header_color = "🟡"
+            else:
+                header_color = "🟢"
+            
+            with st.expander(f"{header_color} #{i} {smell_type} in {file}"):
+                # Quick info row
+                col1, col2, col3, col4 = st.columns(4)
                 
                 with col1:
-                    priority_color = {'HIGH': '🔴', 'MEDIUM': '🟡', 'LOW': '🟢'}.get(priority, '⚪')
-                    st.markdown(f"**Priority:** {priority_color} {priority}")
+                    st.metric("Severity", severity)
                 
                 with col2:
-                    effort_color = {'HIGH': '🔴', 'MEDIUM': '🟡', 'LOW': '🟢'}.get(effort, '⚪')
-                    st.markdown(f"**Effort:** {effort_color} {effort}")
+                    st.metric("Effort", effort)
                 
                 with col3:
-                    st.markdown(f"**Impact:** {suggestion.get('rationale', 'N/A')[:50]}...")
+                    st.metric("Impact", f"{impact:.0f}%")
+                
+                with col4:
+                    st.metric("Est. Time", time_estimate)
                 
                 st.divider()
                 
                 # Description
                 if suggestion.get('description'):
-                    st.markdown(f"**Problem:** {suggestion['description']}")
+                    st.markdown(f"**Issue:** {suggestion['description']}")
                 
-                st.markdown(f"**Rationale:** {suggestion.get('rationale', 'N/A')}")
+                # Why it matters
+                if suggestion.get('why_it_matters'):
+                    st.markdown("**Why it matters:**")
+                    for reason in suggestion['why_it_matters']:
+                        st.markdown(f"- {reason}")
+                
+                # Current metrics
+                if suggestion.get('current_metrics'):
+                    st.markdown("**Current Metrics:**")
+                    metrics = suggestion['current_metrics']
+                    metric_cols = st.columns(len(metrics))
+                    for col, (metric_name, metric_value) in zip(metric_cols, metrics.items()):
+                        with col:
+                            st.metric(metric_name.replace('_', ' ').title(), metric_value)
+                
+                st.divider()
                 
                 # Strategies
                 strategies = suggestion.get('strategies', [])
                 if strategies:
-                    st.markdown("#### Suggested Strategies:")
+                    st.markdown(f"**Recommended Strategies ({len(strategies)}):**")
                     
-                    for strategy in strategies:
-                        with st.expander(f"📍 {strategy['name']}"):
-                            st.markdown(f"**Description:** {strategy['description']}")
+                    for strat_idx, strategy in enumerate(strategies, 1):
+                        with st.expander(f"💡 Strategy {strat_idx}: {strategy.get('name', 'Unknown')}"):
+                            st.markdown(f"**Description:** {strategy.get('description', '')}")
                             
-                            st.markdown("**Steps:**")
-                            for step in strategy.get('steps', []):
-                                st.markdown(f"- {step}")
+                            st.markdown("**Implementation Steps:**")
+                            steps = strategy.get('steps', [])
+                            for step in steps:
+                                st.markdown(f"{step}")
                             
-                            if strategy.get('benefit'):
-                                st.markdown(f"**Benefit:** {strategy['benefit']}")
+                            if strategy.get('benefits'):
+                                st.markdown(f"**Benefits:** {strategy['benefits']}")
+                            
+                            if strategy.get('code_example'):
+                                with st.expander("📝 Code Example"):
+                                    st.code(strategy['code_example'], language='python')
+                
+                # Before/After
+                if suggestion.get('before_after'):
+                    st.markdown("#### Before & After Comparison")
+                    
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.markdown("**BEFORE (Current):**")
+                        st.code(suggestion['before_after'].get('before', ''), language='python')
+                    
+                    with col2:
+                        st.markdown("**AFTER (Refactored):**")
+                        st.code(suggestion['before_after'].get('after', ''), language='python')
+                
+                # Test coverage note
+                if suggestion.get('test_coverage'):
+                    st.info(f"ℹ️ **Testing Note:** {suggestion['test_coverage']}")
+                
+                # Next steps
+                if suggestion.get('next_steps'):
+                    st.markdown("**Next Steps:**")
+                    for step in suggestion['next_steps']:
+                        st.markdown(f"- {step}")
     else:
         st.success("✅ No refactoring suggestions at this time!")
     

@@ -75,6 +75,7 @@ from onboarding import (
     render_summary,
 )
 from code_health.visualization import render_code_health_tab
+from contributions_viz import render_contributions_tab
 
 # ===============================
 # ⚙️ SETUP
@@ -302,6 +303,7 @@ try:
         "🧭 Navigation",
         "📝 Documentation",
         "💪 Code Health",
+        "👥 Contributions",
     ])
     
     with onboarding_tabs[0]:  # Overview Tab
@@ -361,6 +363,14 @@ try:
         except Exception as e:
             st.error(f"[ERROR] Error loading Code Health analysis: {type(e).__name__}: {e}")
             print(f"Debug - repo_source_path: {repo_source_path}")
+            print(traceback.format_exc())
+
+    with onboarding_tabs[7]:  # Contributions Tab
+        st.markdown("### 👥 Code Contributions & Commit History")
+        try:
+            render_contributions_tab(active_repo)
+        except Exception as e:
+            st.error(f"[ERROR] Error loading Contributions analysis: {type(e).__name__}: {e}")
             print(traceback.format_exc())
 
 except Exception as e:
