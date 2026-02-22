@@ -1,7 +1,8 @@
-# callgraph.py - Call graph extraction for Python and JavaScript/TypeScript
+# callgraph.py - Call graph extraction for all languages
 
 import ast
-from typing import List, Tuple
+from typing import List, Tuple, Optional
+from .semantic_analyzer import TreeSitterSemanticAnalyzer, _HAS_TREE_SITTER
 
 
 def extract_python_calls(text: str) -> List[Tuple[str, str]]:
@@ -47,65 +48,53 @@ def extract_python_calls(text: str) -> List[Tuple[str, str]]:
 
 def extract_js_ts_calls(text: str, file_ext: str) -> List[Tuple[str, str]]:
     """
-    Use Tree-sitter to extract function -> function calls in JS/TS.
+    Use Tree-sitter to extract function -> function calls in JS/TS and other languages.
     Returns list of (caller_name, callee_symbol).
+    
+    Supports: JavaScript, TypeScript, Java, C, C++, Go, Rust, and more.
     """
-    # Try to import tree-sitter
-    try:
-        from tree_sitter import Parser
-        from tree_sitter_languages import get_language
-    except Exception:
+    if not _HAS_TREE_SITTER:
         return []
-
-    EXT_TO_TS_LANG = {
+    
+    # Map file extensions to language names
+    ext_to_lang = {
         ".js": "javascript",
         ".ts": "typescript",
+        ".tsx": "typescript",
+        ".jsx": "javascript",
+        ".java": "java",
+        ".c": "c",
+        ".cpp": "cpp",
+        ".cc": "cpp",
+        ".cxx": "cpp",
+        ".h": "c",
+        ".hpp": "cpp",
+        ".go": "go",
+        ".rs": "rust",
     }
-
-    lang_name = EXT_TO_TS_LANG.get(file_ext)
-    if lang_name not in ("javascript", "typescript"):
+    
+    language = ext_to_lang.get(file_ext.lower())
+    if not language:
         return []
-
+    
     try:
-        language = get_language(lang_name)
-        parser = Parser()
-        parser.set_language(language)
+        analyzer = TreeSitterSemanticAnalyzer("", text, language)
+        return analyzer.extract_call_graph()
     except Exception:
         return []
 
-    source_bytes = text.encode()
-    tree = parser.parse(source_bytes)
-    root = tree.root_node
 
-    calls = []
-    current_func = None
-
-    def walk(node):
-        nonlocal current_func
-
-        # function_declaration or method_definition
-        if node.type in ("function_declaration", "method_definition"):
-            name_node = None
-            for c in node.children:
-                if c.type == "identifier":
-                    name_node = c
-                    break
-            if name_node:
-                current_func = source_bytes[name_node.start_byte:name_node.end_byte].decode(errors="ignore")
-
-        # call_expression
-        if node.type == "call_expression":
-            try:
-                func_node = node.child_by_field_name("function")
-                if func_node:
-                    callee = source_bytes[func_node.start_byte:func_node.end_byte].decode(errors="ignore")
-                    if current_func and callee:
-                        calls.append((current_func, callee))
-            except Exception:
-                pass
-
-        for c in node.children:
-            walk(c)
-
-    walk(root)
-    return calls
+def extract_calls_unified(text: str, file_ext: str) -> List[Tuple[str, str]]:
+    """
+    Unified call graph extraction for ANY language.
+    
+    Uses:
+    - Python AST for .py files (more accurate for Python)
+    - Tree-sitter semantic analyzer for all other languages (Java, C++, JavaScript, etc.)
+    
+    Returns list of (caller_name, callee_symbol).
+    """
+    if file_ext.lower() == ".py":
+        return extract_python_calls(text)
+    else:
+        return extract_js_ts_calls(text, file_ext)

@@ -1,6 +1,7 @@
 """
 Enhanced Refactoring Suggestions with Code Examples and Implementation Details.
 Provides detailed, actionable refactoring recommendations with before/after examples.
+Supports multiple languages: Python, Java, C/C++, JavaScript, TypeScript, Go, Rust.
 """
 
 from typing import Dict, List, Optional
@@ -14,6 +15,22 @@ class EnhancedRefactoringAdvisor:
         self.analyzer = analyzer
         self.smells = smells
         self.stats = stats
+        self.language = self._detect_language()
+    
+    def _detect_language(self) -> str:
+        """Detect the primary programming language from stats."""
+        file_stats = self.stats.get('file_stats', {})
+        if not file_stats:
+            return 'python'  # Default
+        
+        # Count files by language
+        language_count = {}
+        for file_path, stats in file_stats.items():
+            lang = stats.get('language', 'python')
+            language_count[lang] = language_count.get(lang, 0) + 1
+        
+        # Return most common language
+        return max(language_count.items(), key=lambda x: x[1])[0] if language_count else 'python'
     
     def generate_enhanced_suggestions(self) -> List[Dict]:
         """Generate detailed refactoring suggestions with examples."""
@@ -531,8 +548,39 @@ class Customer:
     # Helper methods for code examples
     
     def _generate_god_file_example(self, file_path: str) -> str:
-        """Generate example for god file refactoring."""
-        return '''# Before: huge models.py (2000+ LOC)
+        """Generate example for god file refactoring (language-aware)."""
+        if self.language in ('cpp', 'c'):
+            return '''// Before: huge models.h/models.cpp (2000+ LOC)
+// After: Refactored as modular headers/sources
+
+models/
+├── CMakeLists.txt
+├── user.h / user.cpp          # User, UserProfile classes
+├── auth.h / auth.cpp          # Authentication logic
+├── permissions.h / permissions.cpp  # Permission checking
+└── validators.h / validators.cpp    # Data validation'''
+        elif self.language == 'java':
+            return '''// Before: huge Models.java (2000+ LOC)
+// After: Refactored as package/
+            
+com/app/models/
+├── User.java
+├── UserProfile.java
+├── Authentication.java
+├── Permission.java
+└── DataValidator.java'''
+        elif self.language in ('javascript', 'typescript'):
+            return '''// Before: huge models.js/ts (2000+ LOC)
+// After: Refactored as modular exports
+
+models/
+├── index.ts          # Exports public API
+├── user.ts           # User, UserProfile classes
+├── auth.ts           # Authentication logic
+├── permissions.ts    # Permission checking
+└── validators.ts     # Data validation'''
+        else:  # Python default
+            return '''# Before: huge models.py (2000+ LOC)
 # After: Refactored as package/
 
 models/
@@ -543,8 +591,41 @@ models/
 └── validators.py    # Data validation'''
     
     def _generate_layer_extraction_example(self, file_path: str) -> str:
-        """Generate example for layer extraction."""
-        return '''# Before: services.py has everything mixed
+        """Generate example for layer extraction (language-aware)."""
+        if self.language in ('cpp', 'c'):
+            return '''// Before: services.h/cpp has everything mixed
+// After: Separated by layers
+
+services/
+├── CMakeLists.txt
+├── models.h/cpp          # Data models
+├── business_logic.h/cpp  # Business logic
+├── utils.h/cpp           # Utilities
+└── exceptions.h/cpp      # Custom exceptions'''
+        elif self.language == 'java':
+            return '''// Before: Services.java has everything mixed
+// After: Separated by layers
+
+com/app/services/
+├── model/
+│   └── UserModel.java
+├── logic/
+│   └── UserBusinessLogic.java
+├── utils/
+│   └── UserUtils.java
+└── exception/
+    └── UserException.java'''
+        elif self.language in ('javascript', 'typescript'):
+            return '''// Before: services.ts has everything mixed
+// After: Separated by layers
+
+services/
+├── models.ts         # Data models
+├── logic.ts          # Business logic
+├── utils.ts          # Utilities
+└── exceptions.ts     # Custom exceptions'''
+        else:  # Python default
+            return '''# Before: services.py has everything mixed
 # After: Separated by layers
 
 services/
@@ -555,8 +636,30 @@ services/
 └── exceptions.py    # Custom exceptions'''
     
     def _generate_package_conversion_example(self, file_path: str) -> str:
-        """Generate example for package conversion."""
-        return '''from payment.processor import PaymentProcessor
+        """Generate example for package conversion (language-aware)."""
+        if self.language in ('cpp', 'c'):
+            return '''// AFTER: Modular includes
+#include "payment/processor.h"
+#include "payment/validators.h"
+#include "payment/handlers.h"
+
+// vs BEFORE: Everything in one huge payment.h'''
+        elif self.language == 'java':
+            return '''// AFTER: Modular imports
+import com.payment.processor.PaymentProcessor;
+import com.payment.validators.PaymentValidator;
+import com.payment.handlers.ErrorHandler;
+
+// vs BEFORE: Everything in one huge Payment.java'''
+        elif self.language in ('javascript', 'typescript'):
+            return '''// AFTER: Modular imports
+import { PaymentProcessor } from './payment/processor';
+import { PaymentValidator } from './payment/validators';
+import { ErrorHandler } from './payment/handlers';
+
+// vs BEFORE: Everything in payment.ts'''
+        else:  # Python default
+            return '''from payment.processor import PaymentProcessor
 from payment.validators import PaymentValidator
 from payment.handlers import ErrorHandler
 
@@ -564,8 +667,107 @@ from payment.handlers import ErrorHandler
 from payment import PaymentProcessor, PaymentValidator, ErrorHandler'''
     
     def _generate_long_function_example(self) -> str:
-        """Generate example for long function extraction."""
-        return '''# BEFORE: 75-line function
+        """Generate example for long function extraction (language-aware)."""
+        if self.language in ('cpp', 'c'):
+            return '''// BEFORE: 75-line function
+void processOrder(Order& order) {
+    // Validation - 15 lines
+    if (order.items.empty()) {
+        throw std::invalid_argument("Empty order");
+    }
+    // ... more validation
+    
+    // Processing - 30 lines
+    double total = 0;
+    for (auto& item : order.items) total += item.price;
+    // ... more processing
+    
+    // Save - 10 lines
+    db.save(order);
+    
+    // Notification - 20 lines
+    sendEmail(...);
+}
+
+// AFTER: Extracted helpers
+void processOrder(Order& order) {
+    validateOrder(order);
+    calculateTotal(order);
+    saveOrder(order);
+    notifyCustomer(order);
+}
+
+void validateOrder(Order& order) { ... }
+void calculateTotal(Order& order) { ... }
+void saveOrder(Order& order) { ... }
+void notifyCustomer(Order& order) { ... }'''
+        elif self.language == 'java':
+            return '''// BEFORE: 75-line function
+public void processOrder(Order order) {
+    // Validation - 15 lines
+    if (order.getItems().isEmpty()) {
+        throw new IllegalArgumentException("Empty order");
+    }
+    // ... more validation
+    
+    // Processing - 30 lines
+    double total = order.getItems().stream()
+        .mapToDouble(Item::getPrice).sum();
+    // ... more processing
+    
+    // Save - 10 lines
+    db.save(order);
+    
+    // Notification - 20 lines
+    sendEmail(...);
+}
+
+// AFTER: Extracted helpers
+public void processOrder(Order order) {
+    validateOrder(order);
+    calculateTotal(order);
+    saveOrder(order);
+    notifyCustomer(order);
+}
+
+private void validateOrder(Order order) { ... }
+private double calculateTotal(Order order) { ... }
+private void saveOrder(Order order) { ... }
+private void notifyCustomer(Order order) { ... }'''
+        elif self.language in ('javascript', 'typescript'):
+            return '''// BEFORE: 75-line function
+function processOrder(order: Order) {
+    // Validation - 15 lines
+    if (!order.items || order.items.length === 0) {
+        throw new Error("Empty order");
+    }
+    // ... more validation
+    
+    // Processing - 30 lines
+    const total = order.items.reduce((sum, item) => sum + item.price, 0);
+    // ... more processing
+    
+    // Save - 10 lines
+    db.save(order);
+    
+    // Notification - 20 lines
+    sendEmail(...);
+}
+
+// AFTER: Extracted helpers
+function processOrder(order: Order) {
+    validateOrder(order);
+    calculateTotal(order);
+    saveOrder(order);
+    notifyCustomer(order);
+}
+
+function validateOrder(order: Order) { ... }
+function calculateTotal(order: Order) { ... }
+function saveOrder(order: Order) { ... }
+function notifyCustomer(order: Order) { ... }'''
+        else:  # Python default
+            return '''# BEFORE: 75-line function
 def process_order(order):
     # Validation - 15 lines
     if not order.items:
@@ -595,8 +797,81 @@ def save_order(order): ...
 def notify_customer(order): ...'''
     
     def _generate_guard_clause_example(self) -> str:
-        """Generate example for guard clauses."""
-        return '''# BEFORE: Nested conditionals
+        """Generate example for guard clauses (language-aware)."""
+        if self.language in ('cpp', 'c'):
+            return '''// BEFORE: Nested conditionals
+double calculateDiscount(Customer* customer, double total) {
+    if (customer) {
+        if (customer->isPremium()) {
+            if (total > 1000) {
+                return 0.2;
+            } else {
+                return 0.1;
+            }
+        } else {
+            return 0.05;
+        }
+    } else {
+        return 0;
+    }
+}
+
+// AFTER: Guard clauses
+double calculateDiscount(Customer* customer, double total) {
+    if (!customer) return 0;
+    if (!customer->isPremium()) return 0.05;
+    return total > 1000 ? 0.2 : 0.1;
+}'''
+        elif self.language == 'java':
+            return '''// BEFORE: Nested conditionals
+public double calculateDiscount(Customer customer, double total) {
+    if (customer != null) {
+        if (customer.isPremium()) {
+            if (total > 1000) {
+                return 0.2;
+            } else {
+                return 0.1;
+            }
+        } else {
+            return 0.05;
+        }
+    } else {
+        return 0;
+    }
+}
+
+// AFTER: Guard clauses
+public double calculateDiscount(Customer customer, double total) {
+    if (customer == null) return 0;
+    if (!customer.isPremium()) return 0.05;
+    return total > 1000 ? 0.2 : 0.1;
+}'''
+        elif self.language in ('javascript', 'typescript'):
+            return '''// BEFORE: Nested conditionals
+function calculateDiscount(customer: Customer | null, total: number): number {
+    if (customer) {
+        if (customer.isPremium()) {
+            if (total > 1000) {
+                return 0.2;
+            } else {
+                return 0.1;
+            }
+        } else {
+            return 0.05;
+        }
+    } else {
+        return 0;
+    }
+}
+
+// AFTER: Guard clauses
+function calculateDiscount(customer: Customer | null, total: number): number {
+    if (!customer) return 0;
+    if (!customer.isPremium()) return 0.05;
+    return total > 1000 ? 0.2 : 0.1;
+}'''
+        else:  # Python default
+            return '''# BEFORE: Nested conditionals
 def calculate_discount(customer, total):
     if customer:
         if customer.is_premium:

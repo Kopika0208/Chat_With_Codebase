@@ -195,9 +195,9 @@ def render_contributions_tab(repo_name: str):
     # ========== CONTRIBUTION DISTRIBUTION ==========
     st.markdown("### 📈 Contribution Distribution")
     
-    # Create a bar chart of commits per author
+    # Create a bar chart of commits per author using Streamlit (no plotly needed)
     try:
-        import plotly.graph_objects as go
+        import pandas as pd
         
         top_n_dist = min(20, len(sorted_authors))
         top_authors_data = sorted_authors[:top_n_dist]
@@ -214,25 +214,13 @@ def render_contributions_tab(repo_name: str):
             author_names.append(author_name[:20])  # Truncate long names
             commits_list.append(author_data.get("commits", 0))
         
-        fig = go.Figure(data=[
-            go.Bar(
-                x=author_names,
-                y=commits_list,
-                marker=dict(color="steelblue"),
-                text=commits_list,
-                textposition="outside"
-            )
-        ])
+        # Create DataFrame for Streamlit's built-in chart
+        chart_data = pd.DataFrame({
+            'Author': author_names,
+            'Commits': commits_list
+        })
         
-        fig.update_layout(
-            title="Commits per Author",
-            xaxis_title="Author",
-            yaxis_title="Commits",
-            height=400,
-            showlegend=False
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
+        st.bar_chart(chart_data.set_index('Author'), use_container_width=True)
     except Exception as e:
         st.warning(f"Could not render chart: {e}")
     

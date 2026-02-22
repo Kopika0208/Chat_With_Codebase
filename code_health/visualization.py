@@ -5,10 +5,42 @@ Streamlit visualization for Code Health & Quality analysis.
 import streamlit as st
 import json
 import pandas as pd
-from typing import Dict, List
+from typing import Dict, List, Optional
 from code_health import CodeStatistics, HealthScoreCalculator, CodeSmellDetector, RefactoringAdvisor
 from code_health.enhanced_analysis import EnhancedHealthAnalyzer
 from code_health.enhanced_refactoring import EnhancedRefactoringAdvisor
+
+
+def _detect_code_language(file_stats: Dict) -> str:
+    """
+    Detect the primary programming language from file statistics.
+    Returns language for syntax highlighting: 'python', 'java', 'cpp', etc.
+    """
+    if not file_stats:
+        return 'python'  # Default fallback
+    
+    # Count files by language
+    language_count = {}
+    for file_path, stats in file_stats.items():
+        lang = stats.get('language', 'python')
+        language_count[lang] = language_count.get(lang, 0) + 1
+    
+    # Return most common language
+    most_common = max(language_count.items(), key=lambda x: x[1])[0] if language_count else 'python'
+    
+    # Map to Streamlit syntax highlighting names
+    lang_map = {
+        'python': 'python',
+        'java': 'java',
+        'cpp': 'cpp',
+        'c': 'c',
+        'javascript': 'javascript',
+        'typescript': 'typescript',
+        'go': 'go',
+        'rust': 'rust',
+    }
+    
+    return lang_map.get(most_common, 'python')
 
 
 def render_code_health_tab(repo_path: str, call_graph: Dict, symbol_table: Dict) -> None:
@@ -43,6 +75,11 @@ def render_code_health_tab(repo_path: str, call_graph: Dict, symbol_table: Dict)
             if not repo_stats or not isinstance(repo_stats, dict):
                 st.error("[ERROR] Unable to compute code statistics. Repository may be empty or invalid.")
                 return
+            
+            # Detect primary programming language for code examples
+            file_stats = stats.get('file_stats', {})
+            code_language = _detect_code_language(file_stats)
+            st.session_state['code_language'] = code_language
             
             # Calculate health score
             health_calculator = HealthScoreCalculator(stats, call_graph, normalized_symbol_table)
@@ -529,21 +566,24 @@ def render_code_health_tab(repo_path: str, call_graph: Dict, symbol_table: Dict)
                             
                             if strategy.get('code_example'):
                                 with st.expander("📝 Code Example"):
-                                    st.code(strategy['code_example'], language='python')
+                                    detected_lang = st.session_state.get('code_language', 'python')
+                                    st.code(strategy['code_example'], language=detected_lang)
                 
                 # Before/After
                 if suggestion.get('before_after'):
                     st.markdown("#### Before & After Comparison")
                     
+                    detected_lang = st.session_state.get('code_language', 'python')
+                    
                     col1, col2 = st.columns(2)
                     
                     with col1:
                         st.markdown("**BEFORE (Current):**")
-                        st.code(suggestion['before_after'].get('before', ''), language='python')
+                        st.code(suggestion['before_after'].get('before', ''), language=detected_lang)
                     
                     with col2:
                         st.markdown("**AFTER (Refactored):**")
-                        st.code(suggestion['before_after'].get('after', ''), language='python')
+                        st.code(suggestion['before_after'].get('after', ''), language=detected_lang)
                 
                 # Test coverage note
                 if suggestion.get('test_coverage'):

@@ -60,11 +60,11 @@ except ImportError:
 
 # Import modular components
 try:
-    from .symbols import extract_python_symbols
+    from .symbols import extract_python_symbols, extract_symbols_unified
     from .dataflow import extract_function_dataflow
     from .knowledge_graph import KnowledgeGraphBuilder
     from .chunking import extract_chunks, EXT_TO_TS_LANG
-    from .callgraph import extract_python_calls, extract_js_ts_calls
+    from .callgraph import extract_python_calls, extract_js_ts_calls, extract_calls_unified
     from .resolver import SymbolResolver
     from .utils import clone_or_open_repo, list_repo_files, get_commit_info
     from .contributions import extract_contributions
@@ -73,12 +73,14 @@ except ImportError as e:
     print(f"Warning: Some ingestion modules failed to import: {e}")
     # Define stubs to prevent NameError
     extract_python_symbols = None
+    extract_symbols_unified = None
     extract_function_dataflow = None
     KnowledgeGraphBuilder = None
     extract_chunks = None
     EXT_TO_TS_LANG = {}
     extract_python_calls = None
     extract_js_ts_calls = None
+    extract_calls_unified = None
     SymbolResolver = None
     clone_or_open_repo = None
     list_repo_files = None
@@ -140,20 +142,26 @@ def ingest_repo(repo_url_or_path: str, repo_name: str = None, return_data: bool 
 
             file_records.append((prefixed_rel_path, ext, content))
 
-            # Extract Python symbols using AST
-            if ext == ".py":
+            # Extract symbols using unified analyzer for ALL supported languages
+            # Supports: Python, Java, C/C++, JavaScript/TypeScript, Go, Rust
+            supported_langs = {".py", ".java", ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", 
+                              ".js", ".ts", ".tsx", ".jsx", ".go", ".rs"}
+            
+            if ext in supported_langs:
                 try:
-                    symbol_table = extract_python_symbols(prefixed_rel_path, content)
+                    # Use Python AST for .py, Tree-sitter semantic analyzer for others
+                    symbol_table = extract_symbols_unified(prefixed_rel_path, content)
                     symbol_resolver.add_symbol_table(prefixed_rel_path, symbol_table)
                     print(f"📊 Extracted {len(symbol_table.all_symbols)} symbols from {prefixed_rel_path}")
                     
-                    # Extract data flow analysis
-                    dataflow_analysis = extract_function_dataflow(prefixed_rel_path, content)
-                    if dataflow_analysis:
-                        dataflow_by_file[prefixed_rel_path] = dataflow_analysis
-                        print(f"🔄 Data flow analysis for {len(dataflow_analysis)} functions in {prefixed_rel_path}")
+                    # Extract data flow analysis (currently only for Python)
+                    if ext == ".py":
+                        dataflow_analysis = extract_function_dataflow(prefixed_rel_path, content)
+                        if dataflow_analysis:
+                            dataflow_by_file[prefixed_rel_path] = dataflow_analysis
+                            print(f"🔄 Data flow analysis for {len(dataflow_analysis)} functions in {prefixed_rel_path}")
                 except Exception as e:
-                    print(f"⚠️ Symbol/dataflow extraction failed for {prefixed_rel_path}: {e}")
+                    print(f"⚠️ Symbol extraction failed for {prefixed_rel_path}: {e}")
 
             # Extract code chunks
             chunks = extract_chunks(content, ext)
@@ -164,11 +172,10 @@ def ingest_repo(repo_url_or_path: str, repo_name: str = None, return_data: bool 
                 node_type = c.get("node_type") or ""
                 language = c.get("language") or EXT_TO_TS_LANG.get(ext, ext.lstrip("."))
 
-                # Build symbol index for functions/methods
-                if name and language in ("python", "javascript", "typescript"):
-                    if any(t in str(node_type).lower() for t in ["function", "method"]):
-                        fqn = f"{prefixed_rel_path}:{name}"
-                        symbol_to_fqn.setdefault(name, []).append(fqn)
+                # Build symbol index for functions/methods (ALL LANGUAGES)
+                if name and any(t in str(node_type).lower() for t in ["function", "method", "class"]):
+                    fqn = f"{prefixed_rel_path}:{name}"
+                    symbol_to_fqn.setdefault(name, []).append(fqn)
 
                 doc_metadata = {
                     "path": prefixed_rel_path,
@@ -217,12 +224,14 @@ def ingest_repo(repo_url_or_path: str, repo_name: str = None, return_data: bool 
         return
 
     # ========== SECOND PASS: CALL GRAPH ==========
+    # Extract call graphs for ALL supported languages using unified analyzer
+    supported_call_langs = {".py", ".java", ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", 
+                           ".js", ".ts", ".tsx", ".jsx", ".go", ".rs"}
+    
     for rel_path, ext, content in file_records:
         try:
-            if ext == ".py":
-                raw_calls = extract_python_calls(content)
-            elif ext in (".js", ".ts"):
-                raw_calls = extract_js_ts_calls(content, ext)
+            if ext in supported_call_langs:
+                raw_calls = extract_calls_unified(content, ext)
             else:
                 raw_calls = []
 

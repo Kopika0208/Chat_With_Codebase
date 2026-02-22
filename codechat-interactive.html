@@ -1,0 +1,1484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CodeChat — AI Codebase Explorer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --bg0: #080b10;
+  --bg1: #0c1018;
+  --bg2: #111622;
+  --bg3: #171e2e;
+  --bg4: #1e2840;
+  --bg5: #252f4a;
+  --border: rgba(99,130,220,0.12);
+  --border2: rgba(99,130,220,0.22);
+  --border3: rgba(99,130,220,0.35);
+  --text0: #e4e9f5;
+  --text1: #8b96b8;
+  --text2: #4a5470;
+  --text3: #2e3650;
+  --blue: #5b8df5;
+  --blue2: #3d6fe0;
+  --blue-glow: rgba(91,141,245,0.15);
+  --blue-glow2: rgba(91,141,245,0.08);
+  --green: #3ecf8e;
+  --green-dim: rgba(62,207,142,0.1);
+  --yellow: #f5c14a;
+  --yellow-dim: rgba(245,193,74,0.1);
+  --red: #f56b6b;
+  --red-dim: rgba(245,107,107,0.1);
+  --cyan: #38c9d9;
+  --purple: #a78bfa;
+  --orange: #fb923c;
+  --mono: 'JetBrains Mono', monospace;
+  --sans: 'Outfit', sans-serif;
+  --r: 6px;
+  --r2: 10px;
+  --r3: 16px;
+}
+
+html, body { height: 100%; overflow: hidden; }
+
+body {
+  font-family: var(--mono);
+  background: var(--bg0);
+  color: var(--text0);
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+/* Ambient background */
+body::before {
+  content: '';
+  position: fixed;
+  top: -200px; left: -200px;
+  width: 600px; height: 600px;
+  background: radial-gradient(circle, rgba(91,141,245,0.04) 0%, transparent 70%);
+  pointer-events: none;
+  z-index: 0;
+}
+body::after {
+  content: '';
+  position: fixed;
+  bottom: -100px; right: -100px;
+  width: 400px; height: 400px;
+  background: radial-gradient(circle, rgba(62,207,142,0.03) 0%, transparent 70%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* ═══ TOP BAR ═══════════════════════════════════════════════════ */
+#topbar {
+  height: 40px;
+  background: var(--bg1);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  padding: 0 14px;
+  gap: 12px;
+  flex-shrink: 0;
+  position: relative;
+  z-index: 10;
+}
+
+.logo {
+  font-family: var(--sans);
+  font-weight: 800;
+  font-size: 14px;
+  color: var(--blue);
+  letter-spacing: -0.02em;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-right: 8px;
+}
+.logo-icon {
+  width: 22px; height: 22px;
+  background: linear-gradient(135deg, var(--blue) 0%, var(--cyan) 100%);
+  border-radius: 5px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 800; color: #fff; font-family: var(--sans);
+}
+
+.pipeline {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.pip-step {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: 20px;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+  border: 1px solid transparent;
+  transition: all 0.4s ease;
+  cursor: default;
+}
+.pip-step.done { background: var(--green-dim); border-color: rgba(62,207,142,0.2); color: var(--green); }
+.pip-step.run  { background: var(--blue-glow); border-color: rgba(91,141,245,0.3); color: var(--blue); }
+.pip-step.wait { background: transparent; border-color: var(--border); color: var(--text2); }
+
+.pip-dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.pip-dot.pulse { animation: pd 1.2s ease infinite; }
+@keyframes pd { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.3;transform:scale(0.7)} }
+
+.pip-arrow { color: var(--text3); font-size: 9px; margin: 0 1px; }
+
+.topbar-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 10px;
+  color: var(--text2);
+}
+
+.stat-chip {
+  display: flex; align-items: center; gap: 5px;
+  background: var(--bg3); border: 1px solid var(--border);
+  padding: 3px 8px; border-radius: 20px; font-size: 10px; color: var(--text1);
+}
+.stat-chip .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--green); box-shadow: 0 0 6px var(--green); }
+
+/* ═══ LAYOUT ═══════════════════════════════════════════════════ */
+#layout {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 220px 1fr 380px;
+  overflow: hidden;
+  position: relative;
+  z-index: 1;
+}
+
+/* Resize handles */
+.resize-handle {
+  position: absolute;
+  top: 0; bottom: 0;
+  width: 4px;
+  cursor: col-resize;
+  z-index: 100;
+  transition: background 0.15s;
+}
+.resize-handle:hover, .resize-handle.dragging { background: rgba(91,141,245,0.4); }
+
+/* ═══ SIDEBAR ═══════════════════════════════════════════════════ */
+#sidebar {
+  background: var(--bg1);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.panel-header {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 8px;
+  flex-shrink: 0;
+}
+.panel-title {
+  font-family: var(--sans);
+  font-size: 10px; font-weight: 600;
+  letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--text2);
+}
+.panel-actions { margin-left: auto; display: flex; gap: 3px; }
+.ibt {
+  background: none; border: none; cursor: pointer; color: var(--text2);
+  width: 22px; height: 22px; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center;
+  transition: all 0.15s;
+}
+.ibt:hover { background: var(--bg4); color: var(--text0); }
+
+.repo-info {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 7px;
+  font-size: 10px;
+}
+.repo-badge {
+  background: var(--blue-glow); border: 1px solid rgba(91,141,245,0.25);
+  color: var(--blue); padding: 2px 7px; border-radius: 4px;
+  font-size: 9px; font-weight: 600; letter-spacing: 0.04em;
+}
+
+/* Search box */
+.tree-search {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.tree-search input {
+  width: 100%;
+  background: var(--bg3); border: 1px solid var(--border);
+  color: var(--text0); font-family: var(--mono); font-size: 10px;
+  padding: 5px 8px 5px 26px; border-radius: var(--r);
+  outline: none; transition: border-color 0.15s;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%234a5470' stroke-width='2'%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cpath d='m21 21-4.35-4.35'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: 8px center;
+}
+.tree-search input:focus { border-color: var(--border2); }
+.tree-search input::placeholder { color: var(--text2); }
+
+.tree { flex: 1; overflow-y: auto; padding: 4px 0; }
+.tree::-webkit-scrollbar { width: 3px; }
+.tree::-webkit-scrollbar-thumb { background: var(--bg5); border-radius: 2px; }
+
+.tree-row {
+  display: flex; align-items: center; gap: 5px;
+  padding: 4px 10px 4px 8px;
+  cursor: pointer; font-size: 11px; color: var(--text1);
+  border-left: 2px solid transparent;
+  transition: all 0.12s;
+  user-select: none;
+  position: relative;
+}
+.tree-row:hover { background: var(--bg3); color: var(--text0); }
+.tree-row.active {
+  background: var(--blue-glow); border-left-color: var(--blue);
+  color: var(--text0);
+}
+.tree-row.active::after {
+  content: '';
+  position: absolute; right: 0; top: 0; bottom: 0;
+  width: 2px; background: var(--blue);
+  border-radius: 2px 0 0 2px;
+}
+.tree-row.folder { color: var(--text2); }
+.tree-row.folder:hover { color: var(--text1); }
+.tree-row .indent { display: inline-block; width: 12px; flex-shrink: 0; }
+
+.lang-tag {
+  margin-left: auto; flex-shrink: 0;
+  font-size: 8px; font-weight: 700; letter-spacing: 0.05em;
+  padding: 1px 4px; border-radius: 3px;
+}
+.lpy  { background: rgba(59,158,222,0.18); color: #5bb8f5; }
+.ljava{ background: rgba(248,152,32,0.18); color: #f8a832; }
+.lc   { background: rgba(106,159,181,0.18); color: #7bc4d9; }
+.lcpp { background: rgba(167,139,250,0.18); color: var(--purple); }
+
+/* ═══ CHAT ═══════════════════════════════════════════════════════ */
+#chatpanel {
+  display: flex; flex-direction: column;
+  background: var(--bg0);
+  overflow: hidden;
+  position: relative;
+}
+
+.chat-header {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg1);
+  display: flex; align-items: center; gap: 10px;
+  flex-shrink: 0;
+}
+.chat-header-title { font-family: var(--sans); font-size: 13px; font-weight: 600; color: var(--text0); }
+.context-badge {
+  font-size: 10px; color: var(--text1);
+  background: var(--bg3); border: 1px solid var(--border);
+  padding: 2px 8px; border-radius: 20px;
+  display: flex; align-items: center; gap: 5px;
+}
+.ctx-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); box-shadow: 0 0 6px var(--green); }
+
+.clear-btn {
+  margin-left: auto;
+  background: none; border: 1px solid var(--border);
+  color: var(--text2); font-family: var(--mono); font-size: 10px;
+  padding: 4px 10px; border-radius: var(--r); cursor: pointer;
+  transition: all 0.15s;
+}
+.clear-btn:hover { border-color: var(--red); color: var(--red); }
+
+#messages {
+  flex: 1; overflow-y: auto;
+  padding: 20px 16px;
+  display: flex; flex-direction: column; gap: 18px;
+  scroll-behavior: smooth;
+}
+#messages::-webkit-scrollbar { width: 3px; }
+#messages::-webkit-scrollbar-thumb { background: var(--bg5); border-radius: 2px; }
+
+.msg { display: flex; gap: 10px; opacity: 0; transform: translateY(12px); animation: msgIn 0.3s ease forwards; }
+@keyframes msgIn { to { opacity: 1; transform: none; } }
+
+.avatar {
+  width: 30px; height: 30px; border-radius: 8px;
+  flex-shrink: 0; margin-top: 2px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 700; font-family: var(--sans);
+}
+.av-user { background: var(--bg4); color: var(--text1); border: 1px solid var(--border2); }
+.av-ai   { background: linear-gradient(135deg, #0d2060 0%, #1a3a90 100%); border: 1px solid rgba(91,141,245,0.3); color: var(--blue); position: relative; overflow: hidden; }
+.av-ai::before { content: ''; position: absolute; inset: 0; background: linear-gradient(135deg, transparent 40%, rgba(91,141,245,0.2)); }
+
+.msg-body { flex: 1; min-width: 0; }
+.msg-meta { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.msg-name { font-family: var(--sans); font-size: 12px; font-weight: 600; color: var(--text0); }
+.msg-time { font-size: 10px; color: var(--text2); }
+.msg-badge {
+  font-size: 9px; padding: 1px 6px; border-radius: 10px;
+  background: var(--green-dim); border: 1px solid rgba(62,207,142,0.2);
+  color: var(--green); display: flex; align-items: center; gap: 4px;
+}
+.msg-badge.thinking { background: var(--blue-glow); border-color: rgba(91,141,245,0.2); color: var(--blue); }
+
+.msg-content { font-size: 12px; line-height: 1.75; color: var(--text0); }
+.msg-content p { margin-bottom: 8px; }
+.msg-content p:last-child { margin-bottom: 0; }
+
+.msg-content code {
+  background: var(--bg4); border: 1px solid var(--border2);
+  padding: 1px 5px; border-radius: 4px; font-size: 11px; color: var(--cyan);
+}
+
+.msg-content pre {
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: var(--r2); margin: 10px 0;
+  overflow-x: auto; position: relative;
+}
+.pre-header {
+  display: flex; align-items: center;
+  padding: 8px 12px 6px;
+  border-bottom: 1px solid var(--border);
+  font-size: 10px; color: var(--text2);
+}
+.pre-lang { color: var(--blue); font-weight: 600; }
+.pre-copy {
+  margin-left: auto; background: none; border: 1px solid var(--border);
+  color: var(--text2); font-family: var(--mono); font-size: 9px;
+  padding: 2px 8px; border-radius: 4px; cursor: pointer;
+  transition: all 0.15s;
+}
+.pre-copy:hover { border-color: var(--blue); color: var(--blue); }
+
+.msg-content pre code {
+  display: block; padding: 12px 14px;
+  background: none; border: none; color: var(--text0);
+  font-size: 11px; line-height: 1.65;
+}
+
+/* Chunks */
+.chunk-section { margin-top: 10px; }
+.chunk-label { font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text2); margin-bottom: 6px; }
+.chunks { display: flex; flex-direction: column; gap: 4px; }
+.chunk {
+  display: flex; align-items: center; gap: 8px;
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: var(--r); padding: 7px 10px;
+  cursor: pointer; font-size: 10px;
+  transition: all 0.15s;
+  position: relative; overflow: hidden;
+}
+.chunk::before {
+  content: '';
+  position: absolute; left: 0; top: 0; bottom: 0;
+  width: 2px; background: var(--blue); opacity: 0;
+  transition: opacity 0.15s;
+}
+.chunk:hover { border-color: var(--border3); background: var(--blue-glow2); }
+.chunk:hover::before { opacity: 1; }
+.chunk-file { color: var(--text0); font-weight: 500; }
+.chunk-sym { color: var(--text2); font-size: 9px; }
+.chunk-lines { margin-left: auto; background: var(--bg4); color: var(--text2); padding: 2px 6px; border-radius: 3px; font-size: 9px; }
+.chunk-lang-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.cdpy   { background: #5bb8f5; }
+.cdjava { background: #f8a832; }
+.cdc    { background: #7bc4d9; }
+.cdcpp  { background: var(--purple); }
+
+/* Thinking */
+.think-wrap { display: flex; gap: 10px; animation: msgIn 0.3s ease forwards; }
+.think-dots { display: flex; gap: 3px; align-items: center; padding: 2px 0; }
+.think-dots span {
+  width: 5px; height: 5px; border-radius: 50%;
+  background: var(--blue); opacity: 0.4;
+  animation: td 1.4s ease infinite;
+}
+.think-dots span:nth-child(2) { animation-delay: 0.2s; }
+.think-dots span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes td { 0%,60%,100%{transform:scale(1);opacity:0.4} 30%{transform:scale(1.4);opacity:1} }
+.think-text { font-size: 11px; color: var(--text2); margin-top: 1px; }
+.think-step { color: var(--blue); font-size: 10px; animation: fadeStep 0.4s ease; }
+@keyframes fadeStep { from{opacity:0;transform:translateX(-4px)} to{opacity:1;transform:none} }
+
+/* Welcome */
+.welcome-card {
+  background: var(--bg2); border: 1px solid var(--border2);
+  border-radius: var(--r2); padding: 18px;
+  position: relative; overflow: hidden;
+}
+.welcome-card::before {
+  content: '';
+  position: absolute; top: 0; left: 0; right: 0; height: 2px;
+  background: linear-gradient(90deg, var(--blue), var(--cyan), var(--green));
+}
+.welcome-card h4 { font-family: var(--sans); font-size: 14px; font-weight: 700; color: var(--text0); margin-bottom: 8px; }
+.welcome-card p { font-size: 11px; line-height: 1.7; color: var(--text1); }
+.cap-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 12px; }
+.cap-item {
+  background: var(--bg3); border: 1px solid var(--border);
+  border-radius: var(--r); padding: 8px 10px;
+  font-size: 10px; color: var(--text1); line-height: 1.5;
+}
+.cap-item strong { display: block; color: var(--text0); margin-bottom: 2px; font-family: var(--sans); font-size: 11px; }
+
+/* Input */
+.input-area {
+  padding: 12px 16px 14px;
+  background: var(--bg1);
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.input-box {
+  background: var(--bg2); border: 1px solid var(--border2);
+  border-radius: var(--r2); padding: 10px 10px 10px 14px;
+  display: flex; align-items: flex-end; gap: 8px;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.input-box:focus-within {
+  border-color: rgba(91,141,245,0.5);
+  box-shadow: 0 0 0 3px var(--blue-glow);
+}
+#inp {
+  flex: 1; background: none; border: none; outline: none;
+  color: var(--text0); font-family: var(--mono); font-size: 12px;
+  resize: none; line-height: 1.6; max-height: 130px; min-height: 20px;
+}
+#inp::placeholder { color: var(--text2); }
+.send-btn {
+  width: 32px; height: 32px; border-radius: 8px;
+  background: var(--blue); border: none; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0; transition: all 0.15s; color: #fff;
+}
+.send-btn:hover { background: #7aa3f7; transform: scale(1.05); }
+.send-btn:active { transform: scale(0.95); }
+.send-btn:disabled { background: var(--bg4); color: var(--text2); cursor: not-allowed; transform: none; }
+
+.quick-btns { display: flex; gap: 5px; margin-top: 8px; flex-wrap: wrap; }
+.qb {
+  background: var(--bg3); border: 1px solid var(--border);
+  color: var(--text1); font-family: var(--mono); font-size: 10px;
+  padding: 4px 10px; border-radius: 20px; cursor: pointer;
+  transition: all 0.15s; white-space: nowrap;
+}
+.qb:hover { border-color: var(--blue); color: var(--blue); background: var(--blue-glow2); }
+
+/* ═══ CODE VIEWER ═══════════════════════════════════════════════ */
+#codeview {
+  background: var(--bg1);
+  border-left: 1px solid var(--border);
+  display: flex; flex-direction: column;
+  overflow: hidden;
+}
+
+.file-tabs {
+  display: flex; align-items: center;
+  border-bottom: 1px solid var(--border);
+  padding: 0 12px; gap: 0;
+  overflow-x: auto; flex-shrink: 0;
+  min-height: 38px;
+}
+.file-tabs::-webkit-scrollbar { height: 2px; }
+.file-tab {
+  display: flex; align-items: center; gap: 6px;
+  padding: 0 12px; height: 38px;
+  font-size: 11px; color: var(--text1);
+  cursor: pointer; border-bottom: 2px solid transparent;
+  transition: all 0.15s; white-space: nowrap;
+  flex-shrink: 0;
+}
+.file-tab:hover { color: var(--text0); background: var(--bg3); }
+.file-tab.active { color: var(--text0); border-bottom-color: var(--blue); background: var(--bg2); }
+.file-tab .close-tab {
+  width: 14px; height: 14px; border-radius: 3px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 10px; color: var(--text2);
+  transition: all 0.1s; background: none; border: none; cursor: pointer;
+}
+.file-tab .close-tab:hover { background: var(--bg5); color: var(--text0); }
+.no-file { color: var(--text2); font-size: 11px; margin: auto; }
+
+.meta-bar {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 0;
+  padding: 6px 12px; border-bottom: 1px solid var(--border);
+  flex-shrink: 0; background: var(--bg2);
+}
+.mb-item {
+  display: flex; align-items: center; gap: 5px;
+  font-size: 10px; color: var(--text2); padding: 0 10px 0 0;
+}
+.mb-item:not(:last-child)::after { content: '·'; margin-left: 10px; color: var(--text3); }
+.mb-item strong { color: var(--text1); font-weight: 500; }
+.mb-highlight {
+  margin-left: auto;
+  font-size: 9px; background: var(--blue-glow); border: 1px solid rgba(91,141,245,0.25);
+  color: var(--blue); padding: 2px 7px; border-radius: 3px;
+  display: flex; align-items: center; gap: 5px;
+}
+
+.code-wrap {
+  flex: 1; overflow: auto;
+  position: relative;
+}
+.code-wrap::-webkit-scrollbar { width: 4px; height: 4px; }
+.code-wrap::-webkit-scrollbar-track { background: var(--bg1); }
+.code-wrap::-webkit-scrollbar-thumb { background: var(--bg5); border-radius: 2px; }
+
+.code-table { display: table; min-width: 100%; padding: 8px 0; }
+
+.cl { display: table-row; transition: background 0.1s; }
+.cl:hover { background: var(--bg3); }
+.cl.hl { background: rgba(91,141,245,0.08); }
+.cl.hl .ln { color: var(--blue); }
+.cl.hl-focus { background: rgba(91,141,245,0.18) !important; animation: hlPulse 1s ease; }
+@keyframes hlPulse { 0%{background:rgba(91,141,245,0.35)} 100%{background:rgba(91,141,245,0.18)} }
+
+.ln {
+  display: table-cell; width: 46px;
+  text-align: right; padding: 0 12px 0 0;
+  color: var(--text3); font-size: 10px;
+  user-select: none; vertical-align: top;
+  padding-top: 1px;
+  position: sticky; left: 0;
+  background: inherit;
+}
+
+.lc { display: table-cell; padding: 0 20px 0 0; white-space: pre; font-size: 11px; line-height: 1.7; color: var(--text0); }
+
+/* Syntax */
+.k { color: #c792ea; } /* keyword */
+.f { color: #82aaff; } /* function */
+.s { color: #c3e88d; } /* string */
+.n { color: #f78c6c; } /* number */
+.cm { color: #546e7a; font-style: italic; } /* comment */
+.cl2 { color: #ffcb6b; } /* class */
+.d { color: #89ddff; } /* decorator/directive */
+.o { color: var(--text2); } /* operator */
+.t { color: var(--cyan); } /* type */
+
+/* Symbols panel */
+.sym-panel {
+  border-top: 1px solid var(--border);
+  background: var(--bg0);
+  flex-shrink: 0;
+  max-height: 160px;
+  overflow: hidden;
+  transition: max-height 0.3s ease;
+}
+.sym-panel.collapsed { max-height: 36px; }
+
+.sym-header {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 10px; color: var(--text2);
+  border-bottom: 1px solid transparent;
+  transition: all 0.15s;
+}
+.sym-header:hover { color: var(--text1); }
+.sym-panel:not(.collapsed) .sym-header { border-bottom-color: var(--border); }
+.sym-toggle { margin-left: auto; transition: transform 0.2s; }
+.sym-panel:not(.collapsed) .sym-toggle { transform: rotate(180deg); }
+
+.sym-list { padding: 6px 8px; display: flex; flex-direction: column; gap: 3px; overflow-y: auto; max-height: 110px; }
+.sym-list::-webkit-scrollbar { width: 3px; }
+.sym-list::-webkit-scrollbar-thumb { background: var(--bg5); }
+.sym-item {
+  display: flex; align-items: center; gap: 7px;
+  padding: 5px 8px; border-radius: var(--r);
+  font-size: 10px; cursor: pointer;
+  transition: background 0.1s;
+}
+.sym-item:hover { background: var(--bg3); }
+.sym-kind {
+  font-size: 8px; font-weight: 700; letter-spacing: 0.05em;
+  padding: 1px 5px; border-radius: 3px;
+}
+.sk-class  { background: rgba(255,203,107,0.18); color: var(--yellow); }
+.sk-fn     { background: rgba(130,170,255,0.18); color: #82aaff; }
+.sk-method { background: rgba(62,207,142,0.18);  color: var(--green); }
+.sym-name  { color: var(--text0); font-weight: 500; flex: 1; }
+.sym-ln    { color: var(--text2); font-size: 9px; }
+
+/* ═══ HEALTH BAR ═══════════════════════════════════════════════ */
+#health-toggle {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 16px;
+  background: var(--bg1); border: none; border-top: 1px solid var(--border);
+  width: 100%; cursor: pointer; color: var(--text2);
+  font-family: var(--mono); font-size: 10px;
+  transition: background 0.15s;
+  flex-shrink: 0;
+}
+#health-toggle:hover { background: var(--bg2); color: var(--text1); }
+
+.health-metrics { display: flex; gap: 16px; flex: 1; }
+.hm { display: flex; align-items: center; gap: 5px; font-size: 10px; }
+.hm-k { color: var(--text2); }
+.hm-v { font-weight: 600; }
+.hm-v.g { color: var(--green); }
+.hm-v.w { color: var(--yellow); }
+.hm-v.b { color: var(--red); }
+
+.ht-chevron { margin-left: auto; transition: transform 0.25s; }
+.health-open .ht-chevron { transform: rotate(180deg); }
+
+#health-panel {
+  background: var(--bg1); border-top: 1px solid var(--border);
+  max-height: 0; overflow: hidden; transition: max-height 0.35s ease;
+  flex-shrink: 0;
+}
+#health-panel.open { max-height: 200px; }
+
+.hp-inner { padding: 12px 16px; display: grid; grid-template-columns: repeat(3,1fr) 2fr; gap: 10px; }
+
+.hcard {
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: var(--r2); padding: 10px 12px;
+}
+.hcard-title { font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text2); margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center; }
+.hcard-score { font-family: var(--sans); font-size: 26px; font-weight: 800; line-height: 1; margin-bottom: 6px; }
+.hcard-bar { height: 3px; background: var(--bg4); border-radius: 2px; overflow: hidden; margin-bottom: 5px; }
+.hcard-fill { height: 100%; border-radius: 2px; transition: width 1s ease; }
+.hcard-sub { font-size: 9px; color: var(--text2); }
+
+.hsuggests { display: flex; flex-direction: column; gap: 0; overflow-y: auto; }
+.hsuggests::-webkit-scrollbar { width: 2px; }
+.hs-row { display: flex; align-items: flex-start; gap: 8px; padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 10px; }
+.hs-row:last-child { border: none; }
+.hs-sev { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; margin-top: 3px; }
+.hs-text { flex: 1; color: var(--text1); line-height: 1.5; }
+.hs-text code { background: var(--bg4); border: 1px solid var(--border); padding: 0 4px; border-radius: 3px; font-size: 9px; color: var(--cyan); }
+.hs-file { color: var(--text2); font-size: 9px; white-space: nowrap; }
+
+/* ═══ TOAST ═════════════════════════════════════════════════════ */
+#toast {
+  position: fixed; bottom: 60px; right: 16px;
+  background: var(--bg3); border: 1px solid var(--border2);
+  color: var(--text0); font-size: 11px;
+  padding: 8px 14px; border-radius: var(--r);
+  pointer-events: none; opacity: 0;
+  transition: opacity 0.3s, transform 0.3s;
+  transform: translateY(8px);
+  z-index: 1000;
+}
+#toast.show { opacity: 1; transform: none; }
+
+/* ═══ EMPTY VIEWER ══════════════════════════════════════════════ */
+.empty-viewer {
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  height: 100%; gap: 12px; color: var(--text2);
+  padding: 20px; text-align: center;
+}
+.empty-viewer svg { opacity: 0.2; }
+.empty-viewer p { font-size: 11px; line-height: 1.7; max-width: 200px; }
+
+/* Scrollbar custom for messages */
+#messages::-webkit-scrollbar { width: 3px; }
+#messages::-webkit-scrollbar-thumb { background: var(--bg5); border-radius: 2px; }
+
+/* Highlight animation for new chunks */
+@keyframes chunkPulse {
+  0% { border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-glow); }
+  100% { border-color: var(--border); box-shadow: none; }
+}
+.chunk.just-added { animation: chunkPulse 0.8s ease forwards; }
+</style>
+</head>
+<body>
+
+<!-- TOP BAR -->
+<div id="topbar">
+  <div class="logo">
+    <div class="logo-icon">CC</div>
+    CodeChat
+  </div>
+
+  <div class="pipeline" id="pipeline">
+    <div class="pip-step done" id="ps0"><div class="pip-dot"></div>Ingested</div>
+    <div class="pip-arrow">›</div>
+    <div class="pip-step done" id="ps1"><div class="pip-dot"></div>AST Parsed</div>
+    <div class="pip-arrow">›</div>
+    <div class="pip-step run"  id="ps2"><div class="pip-dot pulse"></div>Chunking</div>
+    <div class="pip-arrow">›</div>
+    <div class="pip-step wait" id="ps3"><div class="pip-dot"></div>Embedding</div>
+    <div class="pip-arrow">›</div>
+    <div class="pip-step wait" id="ps4"><div class="pip-dot"></div>Ready</div>
+  </div>
+
+  <div class="topbar-right">
+    <div class="stat-chip"><div class="dot"></div>47 files</div>
+    <div class="stat-chip">4 langs</div>
+    <div class="stat-chip" id="tokenCount">12,847 tok</div>
+  </div>
+</div>
+
+<!-- LAYOUT -->
+<div id="layout">
+
+  <!-- SIDEBAR -->
+  <div id="sidebar">
+    <div class="panel-header">
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/></svg>
+      <span class="panel-title">Explorer</span>
+      <div class="panel-actions">
+        <button class="ibt" title="Collapse" onclick="collapseAll()">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="8 3 4 7 8 11"/><line x1="4" y1="7" x2="14" y2="7"/><polyline points="16 13 20 17 16 21"/><line x1="20" y1="17" x2="10" y2="17"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <div class="repo-info">
+      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="var(--text2)" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+      <span style="font-size:10px;color:var(--text1)"><strong>myproject</strong></span>
+      <div class="repo-badge">main</div>
+    </div>
+
+    <div class="tree-search">
+      <input type="text" placeholder="Filter files..." id="treeFilter" oninput="filterTree(this.value)">
+    </div>
+
+    <div class="tree" id="fileTree"></div>
+  </div>
+
+  <!-- CHAT -->
+  <div id="chatpanel">
+    <div class="chat-header">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--text1)" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+      <span class="chat-header-title">Chat</span>
+      <div class="context-badge"><div class="ctx-dot"></div>Context active · <span id="ctxFile">no file</span></div>
+      <button class="clear-btn" onclick="clearChat()">✕ Clear</button>
+    </div>
+
+    <div id="messages">
+      <div class="msg">
+        <div class="avatar av-ai">AI</div>
+        <div class="msg-body">
+          <div class="msg-meta">
+            <span class="msg-name">CodeChat AI</span>
+            <span class="msg-time">now</span>
+          </div>
+          <div class="msg-content">
+            <div class="welcome-card">
+              <h4>🚀 Ready to explore your codebase</h4>
+              <p>I've indexed your repository and I'm ready to help. Ask me anything — from high-level architecture to specific function implementations.</p>
+              <div class="cap-grid">
+                <div class="cap-item"><strong>Explain Code</strong>What does this function do?</div>
+                <div class="cap-item"><strong>Find Bugs</strong>Any memory leaks or race conditions?</div>
+                <div class="cap-item"><strong>Architecture</strong>How do these modules connect?</div>
+                <div class="cap-item"><strong>Refactor</strong>Suggest improvements for this class</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="input-area">
+      <div class="input-box">
+        <textarea id="inp" rows="1" placeholder="Ask about your codebase… (Enter to send, Shift+Enter for newline)" onkeydown="onKey(event)" oninput="resize(this)"></textarea>
+        <button class="send-btn" id="sendBtn" onclick="send()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+        </button>
+      </div>
+      <div class="quick-btns">
+        <div class="qb" onclick="setQ('Explain the entry point and main flow')">Entry point</div>
+        <div class="qb" onclick="setQ('Find potential memory leaks or bugs')">Find bugs</div>
+        <div class="qb" onclick="setQ('Show the class hierarchy and relationships')">Class hierarchy</div>
+        <div class="qb" onclick="setQ('What does the DataProcessor class do?')">DataProcessor</div>
+        <div class="qb" onclick="setQ('Suggest refactoring improvements')">Refactor</div>
+        <div class="qb" onclick="setQ('Explain the build system')">Build system</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- CODE VIEWER -->
+  <div id="codeview">
+    <div class="file-tabs" id="fileTabs">
+      <span class="no-file">No file open</span>
+    </div>
+
+    <div class="meta-bar" id="metaBar">
+      <div class="mb-item">Path <strong id="mbPath">—</strong></div>
+      <div class="mb-item">Lang <strong id="mbLang">—</strong></div>
+      <div class="mb-item">Lines <strong id="mbLines">—</strong></div>
+      <div class="mb-item">Parser <strong id="mbParser">—</strong></div>
+      <div class="mb-highlight" id="mbHighlight" style="display:none">
+        <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+        Highlighted
+      </div>
+    </div>
+
+    <div class="code-wrap" id="codeWrap">
+      <div class="empty-viewer">
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+        <p>Click a file in the sidebar or a code reference in the chat to view it here</p>
+      </div>
+    </div>
+
+    <div class="sym-panel collapsed" id="symPanel">
+      <div class="sym-header" onclick="toggleSymPanel()">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+        <span>Symbols</span>
+        <span id="symCount" style="background:var(--bg4);border-radius:10px;padding:1px 7px;font-size:9px;color:var(--text2)">0</span>
+        <svg class="sym-toggle" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="18 15 12 9 6 15"/></svg>
+      </div>
+      <div class="sym-list" id="symList"></div>
+    </div>
+  </div>
+
+</div>
+
+<!-- HEALTH TOGGLE -->
+<button id="health-toggle" onclick="toggleHealth()">
+  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+  &nbsp;Code Health
+  <div class="health-metrics">
+    <div class="hm"><span class="hm-k">Complexity</span><span class="hm-v w">B</span></div>
+    <div class="hm"><span class="hm-k">Duplication</span><span class="hm-v g">3.2%</span></div>
+    <div class="hm"><span class="hm-k">Smells</span><span class="hm-v b">7</span></div>
+    <div class="hm"><span class="hm-k">Coverage</span><span class="hm-v w">61%</span></div>
+  </div>
+  <svg class="ht-chevron" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="18 15 12 9 6 15"/></svg>
+</button>
+
+<div id="health-panel">
+  <div class="hp-inner">
+    <div class="hcard">
+      <div class="hcard-title">Complexity <span style="color:var(--yellow)">B</span></div>
+      <div class="hcard-score" style="color:var(--yellow)">14.2</div>
+      <div class="hcard-bar"><div class="hcard-fill" style="width:58%;background:var(--yellow)"></div></div>
+      <div class="hcard-sub">avg/function · 3 over threshold</div>
+    </div>
+    <div class="hcard">
+      <div class="hcard-title">Duplication <span style="color:var(--green)">A</span></div>
+      <div class="hcard-score" style="color:var(--green)">3.2%</div>
+      <div class="hcard-bar"><div class="hcard-fill" style="width:10%;background:var(--green)"></div></div>
+      <div class="hcard-sub">~180 duplicate lines</div>
+    </div>
+    <div class="hcard">
+      <div class="hcard-title">Smells <span style="color:var(--red)">C</span></div>
+      <div class="hcard-score" style="color:var(--red)">7</div>
+      <div class="hcard-bar"><div class="hcard-fill" style="width:70%;background:var(--red)"></div></div>
+      <div class="hcard-sub">2 critical · 3 major · 2 minor</div>
+    </div>
+    <div class="hcard" style="grid-row:span 1;padding:8px 12px;">
+      <div class="hsuggests">
+        <div class="hs-row"><div class="hs-sev" style="background:var(--red)"></div><div class="hs-text">Raw pointer <code>m_buffer</code> — use <code>unique_ptr</code></div><div class="hs-file">processor.cpp:47</div></div>
+        <div class="hs-row"><div class="hs-sev" style="background:var(--yellow)"></div><div class="hs-text"><code>parseInput()</code> cyclomatic complexity 18</div><div class="hs-file">parser.py:112</div></div>
+        <div class="hs-row"><div class="hs-sev" style="background:var(--blue)"></div><div class="hs-text">Dead code: <code>legacyConvert()</code> never called</div><div class="hs-file">utils.java:88</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+// ─── CODEBASE DATA ─────────────────────────────────────────────────────────
+const FILES = [
+  { name: 'src/', type:'dir', depth:0 },
+  { name: 'processor.cpp', type:'file', lang:'cpp', depth:1, path:'src/processor.cpp' },
+  { name: 'processor.h',   type:'file', lang:'cpp', depth:1, path:'src/processor.h' },
+  { name: 'utils.c',       type:'file', lang:'c',   depth:1, path:'src/utils.c' },
+  { name: 'network.c',     type:'file', lang:'c',   depth:1, path:'src/network.c' },
+  { name: 'core/',         type:'dir',  depth:1 },
+  { name: 'Engine.java',   type:'file', lang:'java', depth:2, path:'src/core/Engine.java' },
+  { name: 'Scheduler.java',type:'file', lang:'java', depth:2, path:'src/core/Scheduler.java' },
+  { name: 'DataStore.java',type:'file', lang:'java', depth:2, path:'src/core/DataStore.java' },
+  { name: 'python/',       type:'dir',  depth:0 },
+  { name: 'parser.py',     type:'file', lang:'py', depth:1, path:'python/parser.py' },
+  { name: 'tokenizer.py',  type:'file', lang:'py', depth:1, path:'python/tokenizer.py' },
+  { name: 'model.py',      type:'file', lang:'py', depth:1, path:'python/model.py' },
+  { name: 'pipeline.py',   type:'file', lang:'py', depth:1, path:'python/pipeline.py' },
+  { name: 'tests/',        type:'dir',  depth:0 },
+  { name: 'test_parser.py',type:'file', lang:'py', depth:1, path:'tests/test_parser.py' },
+  { name: 'test_engine.java',type:'file',lang:'java',depth:1, path:'tests/test_engine.java' },
+];
+
+const LANG_LABEL = { cpp:'C++', c:'C', java:'Java', py:'Python' };
+const LANG_CLASS = { cpp:'lcpp', c:'lc', java:'ljava', py:'lpy' };
+const LANG_DOT   = { cpp:'cdcpp', c:'cdc', java:'cdjava', py:'cdpy' };
+const PARSER_MAP = { cpp:'Tree-sitter', c:'Tree-sitter', java:'Tree-sitter', py:'Python AST' };
+
+const CODE_SAMPLES = {
+  'processor.cpp': {
+    symbols: [
+      { kind:'CLASS',  label:'DataProcessor', start:1,  end:80 },
+      { kind:'FN',     label:'DataProcessor::init',      start:12, end:20 },
+      { kind:'FN',     label:'DataProcessor::process',   start:22, end:30 },
+      { kind:'FN',     label:'DataProcessor::~DataProcessor', start:32, end:38 },
+    ],
+    lines: [
+      [1,  '<span class="cm">// DataProcessor — core C++ processing unit</span>'],
+      [2,  '<span class="cm">// ⚠ See memory notes in FIXME.md</span>'],
+      [3,  ''],
+      [4,  '<span class="k">#include</span> <span class="s">"processor.h"</span>'],
+      [5,  '<span class="k">#include</span> <span class="s">&lt;stdexcept&gt;</span>'],
+      [6,  '<span class="k">#include</span> <span class="s">&lt;cstring&gt;</span>'],
+      [7,  ''],
+      [8,  '<span class="cm">// Constructor</span>'],
+      [9,  '<span class="cl2">DataProcessor</span>::<span class="f">DataProcessor</span>()'],
+      [10, '  : m_buffer(<span class="k">nullptr</span>), m_size(<span class="n">0</span>) {}'],
+      [11, ''],
+      [12, '<span class="k">void</span> <span class="cl2">DataProcessor</span>::<span class="f">init</span>(<span class="t">size_t</span> size) {'],
+      [13, '  <span class="cm">// TODO: replace raw ptr with std::unique_ptr</span>'],
+      [14, '  m_buffer = <span class="k">new</span> <span class="t">uint8_t</span>[size]; <span class="cm">// ⚠ raw pointer</span>'],
+      [15, '  <span class="f">loadConfig</span>();  <span class="cm">// throws on failure!</span>'],
+      [16, '  m_size = size;'],
+      [17, '}'],
+      [18, ''],
+      [19, '<span class="k">void</span> <span class="cl2">DataProcessor</span>::<span class="f">process</span>('],
+      [20, '  <span class="k">const</span> <span class="t">uint8_t</span>* data, <span class="t">size_t</span> len) {'],
+      [21, '  <span class="k">if</span> (!m_buffer)'],
+      [22, '    <span class="k">throw</span> <span class="cl2">std::runtime_error</span>(<span class="s">"not initialized"</span>);'],
+      [23, '  <span class="f">std::memcpy</span>(m_buffer, data, <span class="f">std::min</span>(len, m_size));'],
+      [24, '  <span class="f">applyTransform</span>(m_buffer, m_size);'],
+      [25, '}'],
+      [26, ''],
+      [27, '<span class="cm">// Destructor — only handles happy path</span>'],
+      [28, '<span class="cl2">DataProcessor</span>::<span class="f">~DataProcessor</span>() {'],
+      [29, '  <span class="k">delete</span>[] m_buffer; <span class="cm">// ⚠ exception path not covered</span>'],
+      [30, '}'],
+    ]
+  },
+  'parser.py': {
+    symbols: [
+      { kind:'CLASS',  label:'CodeParser',  start:7, end:50 },
+      { kind:'METHOD', label:'parse',       start:12, end:18 },
+      { kind:'METHOD', label:'_parse_python', start:20, end:24 },
+      { kind:'FN',     label:'extract_symbols', start:30, end:45 },
+    ],
+    lines: [
+      [1,  '<span class="s">"""</span>'],
+      [2,  '<span class="s">AST-based parser for multi-language support.</span>'],
+      [3,  '<span class="s">Supports Python, Java, C, C++ via Tree-sitter + Python AST.</span>'],
+      [4,  '<span class="s">"""</span>'],
+      [5,  '<span class="k">import</span> ast'],
+      [6,  '<span class="k">from</span> typing <span class="k">import</span> List, Dict, Optional'],
+      [7,  ''],
+      [8,  '<span class="k">class</span> <span class="cl2">CodeParser</span>:'],
+      [9,  '  <span class="s">"""Multi-language code parser."""</span>'],
+      [10, ''],
+      [11, '  <span class="k">def</span> <span class="f">__init__</span>(self, lang: <span class="t">str</span>):'],
+      [12, '    self.lang = lang'],
+      [13, '    self.tree = <span class="k">None</span>'],
+      [14, ''],
+      [15, '  <span class="k">def</span> <span class="f">parse</span>(self, source: <span class="t">str</span>) -> <span class="t">Dict</span>:'],
+      [16, '    <span class="k">if</span> self.lang == <span class="s">"python"</span>:'],
+      [17, '      <span class="k">return</span> self.<span class="f">_parse_python</span>(source)'],
+      [18, '    <span class="k">elif</span> self.lang <span class="k">in</span> (<span class="s">"java"</span>, <span class="s">"c"</span>, <span class="s">"cpp"</span>):'],
+      [19, '      <span class="k">return</span> self.<span class="f">_parse_treesitter</span>(source)'],
+      [20, '    <span class="k">else</span>:'],
+      [21, '      <span class="k">return</span> self.<span class="f">_parse_regex</span>(source) <span class="cm"># fallback</span>'],
+      [22, ''],
+      [23, '  <span class="k">def</span> <span class="f">_parse_python</span>(self, src: <span class="t">str</span>) -> <span class="t">Dict</span>:'],
+      [24, '    tree = ast.<span class="f">parse</span>(src)'],
+      [25, '    <span class="k">return</span> self.<span class="f">_extract_symbols</span>(tree)'],
+    ]
+  },
+  'Engine.java': {
+    symbols: [
+      { kind:'CLASS',  label:'Engine',    start:6,  end:35 },
+      { kind:'METHOD', label:'start',     start:15, end:21 },
+      { kind:'METHOD', label:'runMainLoop', start:23, end:30 },
+    ],
+    lines: [
+      [1,  '<span class="k">package</span> com.myproject.core;'],
+      [2,  ''],
+      [3,  '<span class="k">import</span> java.util.*;'],
+      [4,  '<span class="k">import</span> java.util.concurrent.*;'],
+      [5,  ''],
+      [6,  '<span class="k">public class</span> <span class="cl2">Engine</span> {'],
+      [7,  '  <span class="k">private final</span> <span class="cl2">Scheduler</span> scheduler;'],
+      [8,  '  <span class="k">private final</span> <span class="cl2">DataStore</span> store;'],
+      [9,  '  <span class="k">private volatile boolean</span> running = <span class="k">false</span>;'],
+      [10, ''],
+      [11, '  <span class="k">public</span> <span class="cl2">Engine</span>() {'],
+      [12, '    <span class="k">this</span>.scheduler = <span class="k">new</span> <span class="cl2">Scheduler</span>();'],
+      [13, '    <span class="k">this</span>.store = <span class="k">new</span> <span class="cl2">DataStore</span>();'],
+      [14, '  }'],
+      [15, ''],
+      [16, '  <span class="k">public void</span> <span class="f">start</span>() {'],
+      [17, '    scheduler.<span class="f">init</span>();'],
+      [18, '    store.<span class="f">connect</span>();'],
+      [19, '    running = <span class="k">true</span>;'],
+      [20, '    <span class="f">runMainLoop</span>();'],
+      [21, '  }'],
+      [22, ''],
+      [23, '  <span class="k">private void</span> <span class="f">runMainLoop</span>() {'],
+      [24, '    <span class="k">while</span> (running) {'],
+      [25, '      <span class="cl2">Task</span> t = scheduler.<span class="f">nextTask</span>();'],
+      [26, '      <span class="k">if</span> (t != <span class="k">null</span>) store.<span class="f">persist</span>(t.<span class="f">process</span>());'],
+      [27, '    }'],
+      [28, '  }'],
+      [29, '}'],
+    ]
+  }
+};
+
+// ─── STATE ────────────────────────────────────────────────────────────────
+let openTabs = [];
+let activeTab = null;
+let chatHistory = [];
+let isLoading = false;
+let currentFile = null;
+
+// ─── PIPELINE ANIMATION ───────────────────────────────────────────────────
+setTimeout(() => animatePipeline(), 800);
+function animatePipeline() {
+  const steps = ['ps2','ps3','ps4'];
+  let i = 0;
+  const iv = setInterval(() => {
+    if (i >= steps.length) { clearInterval(iv); return; }
+    const prev = document.getElementById(steps[i]);
+    prev.className = 'pip-step done';
+    prev.querySelector('.pip-dot').classList.remove('pulse');
+    if (i+1 < steps.length) {
+      const next = document.getElementById(steps[i+1]);
+      next.className = 'pip-step run';
+      next.querySelector('.pip-dot').classList.add('pulse');
+    }
+    i++;
+  }, 1400);
+}
+
+// ─── FILE TREE ────────────────────────────────────────────────────────────
+function buildTree(filter='') {
+  const tree = document.getElementById('fileTree');
+  tree.innerHTML = '';
+  const fl = filter.toLowerCase();
+  FILES.forEach(f => {
+    if (fl && f.type === 'file' && !f.name.toLowerCase().includes(fl)) return;
+    if (fl && f.type === 'dir') return;
+    const el = document.createElement('div');
+    el.className = 'tree-row' + (f.type==='dir' ? ' folder' : '') + (f.path && f.path === currentFile ? ' active' : '');
+    const indent = '&nbsp;'.repeat(f.depth * 2);
+    if (f.type === 'dir') {
+      el.innerHTML = `${indent}<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg> ${f.name}`;
+    } else {
+      el.innerHTML = `${indent}<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg> ${f.name}<span class="lang-tag ${LANG_CLASS[f.lang]}">${LANG_LABEL[f.lang]}</span>`;
+      el.onclick = () => openFileInViewer(f);
+    }
+    tree.appendChild(el);
+  });
+}
+
+function filterTree(v) { buildTree(v); }
+function collapseAll() { buildTree(); }
+
+// ─── FILE VIEWER ──────────────────────────────────────────────────────────
+function openFileInViewer(fileObj, hlStart, hlEnd) {
+  currentFile = fileObj.path;
+  updateContextBadge(fileObj.name);
+  buildTree(); // refresh active state
+
+  // Tabs
+  if (!openTabs.find(t => t.path === fileObj.path)) {
+    openTabs.push(fileObj);
+    if (openTabs.length > 3) openTabs.shift();
+  }
+  activeTab = fileObj.path;
+  renderTabs();
+
+  // Meta bar
+  document.getElementById('mbPath').textContent = fileObj.path;
+  document.getElementById('mbLang').textContent = LANG_LABEL[fileObj.lang] || fileObj.lang;
+  document.getElementById('mbLines').textContent = hlStart ? `${hlStart}–${hlEnd}` : 'all';
+  document.getElementById('mbParser').textContent = PARSER_MAP[fileObj.lang] || 'Tree-sitter';
+  const hlBadge = document.getElementById('mbHighlight');
+  hlBadge.style.display = (hlStart ? 'flex' : 'none');
+
+  // Render code
+  const sample = CODE_SAMPLES[fileObj.name];
+  const wrap = document.getElementById('codeWrap');
+
+  if (!sample) {
+    wrap.innerHTML = `<div class="empty-viewer"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/></svg><p>File preview not available</p></div>`;
+    return;
+  }
+
+  const table = document.createElement('div');
+  table.className = 'code-table';
+  sample.lines.forEach(([num, content]) => {
+    const row = document.createElement('div');
+    row.className = 'cl';
+    row.id = `cl-${num}`;
+    if (hlStart && num >= hlStart && num <= hlEnd) row.classList.add('hl');
+    row.innerHTML = `<span class="ln">${num}</span><span class="lc">${content}</span>`;
+    table.appendChild(row);
+  });
+  wrap.innerHTML = '';
+  wrap.appendChild(table);
+
+  // Scroll to highlight
+  if (hlStart) {
+    setTimeout(() => {
+      const el = document.getElementById(`cl-${hlStart}`);
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        el.classList.add('hl-focus');
+        setTimeout(() => el.classList.remove('hl-focus'), 1500);
+      }
+    }, 80);
+  }
+
+  // Symbols
+  renderSymbols(sample.symbols, fileObj);
+}
+
+function renderTabs() {
+  const tabs = document.getElementById('fileTabs');
+  tabs.innerHTML = '';
+  openTabs.forEach(f => {
+    const tab = document.createElement('div');
+    tab.className = 'file-tab' + (f.path === activeTab ? ' active' : '');
+    tab.innerHTML = `<span class="lang-tag ${LANG_CLASS[f.lang]}" style="font-size:7px;padding:1px 3px">${LANG_LABEL[f.lang]}</span>${f.name}<button class="close-tab" onclick="closeTab(event,'${f.path}')">×</button>`;
+    tab.onclick = () => { activeTab = f.path; renderTabs(); openFileInViewer(f); };
+    tabs.appendChild(tab);
+  });
+}
+
+function closeTab(e, path) {
+  e.stopPropagation();
+  openTabs = openTabs.filter(t => t.path !== path);
+  if (activeTab === path) {
+    activeTab = openTabs.length ? openTabs[openTabs.length-1].path : null;
+    if (activeTab) { const f = openTabs.find(t=>t.path===activeTab); if(f) openFileInViewer(f); else clearViewer(); }
+    else clearViewer();
+  }
+  renderTabs();
+}
+
+function clearViewer() {
+  document.getElementById('codeWrap').innerHTML = `<div class="empty-viewer"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg><p>Click a file to open it</p></div>`;
+  document.getElementById('symList').innerHTML = '';
+  document.getElementById('symCount').textContent = '0';
+}
+
+function renderSymbols(syms, fileObj) {
+  const list = document.getElementById('symList');
+  const count = document.getElementById('symCount');
+  const panel = document.getElementById('symPanel');
+  list.innerHTML = '';
+  count.textContent = syms.length;
+  panel.classList.remove('collapsed');
+  syms.forEach(s => {
+    const kindClass = { CLASS:'sk-class', FN:'sk-fn', METHOD:'sk-method' }[s.kind] || 'sk-fn';
+    const el = document.createElement('div');
+    el.className = 'sym-item';
+    el.innerHTML = `<span class="sym-kind ${kindClass}">${s.kind}</span><span class="sym-name">${s.label}</span><span class="sym-ln">L${s.start}–${s.end}</span>`;
+    el.onclick = () => jumpToSymbol(fileObj, s);
+    list.appendChild(el);
+  });
+}
+
+function jumpToSymbol(fileObj, sym) {
+  openFileInViewer(fileObj, sym.start, sym.end);
+}
+
+function toggleSymPanel() {
+  document.getElementById('symPanel').classList.toggle('collapsed');
+}
+
+// ─── CONTEXT BADGE ───────────────────────────────────────────────────────
+function updateContextBadge(name) {
+  document.getElementById('ctxFile').textContent = name;
+}
+
+// ─── HEALTH PANEL ────────────────────────────────────────────────────────
+function toggleHealth() {
+  const panel = document.getElementById('health-panel');
+  const btn = document.getElementById('health-toggle');
+  panel.classList.toggle('open');
+  btn.classList.toggle('health-open');
+}
+
+// ─── CHAT ────────────────────────────────────────────────────────────────
+function onKey(e) {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+}
+function resize(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 130) + 'px';
+}
+function setQ(q) {
+  document.getElementById('inp').value = q;
+  document.getElementById('inp').focus();
+}
+function clearChat() {
+  chatHistory = [];
+  const msgs = document.getElementById('messages');
+  msgs.innerHTML = `<div class="msg"><div class="avatar av-ai">AI</div><div class="msg-body"><div class="msg-meta"><span class="msg-name">CodeChat AI</span></div><div class="msg-content"><div class="welcome-card"><h4>🚀 Chat cleared</h4><p>Ready for a fresh conversation.</p></div></div></div></div>`;
+}
+
+function now() {
+  return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+async function send() {
+  const inp = document.getElementById('inp');
+  const q = inp.value.trim();
+  if (!q || isLoading) return;
+  inp.value = ''; inp.style.height = 'auto';
+
+  addUserMsg(q);
+  isLoading = true;
+  document.getElementById('sendBtn').disabled = true;
+
+  // Add context about current file if open
+  const ctxNote = currentFile ? `\n\n[Context: User has file "${currentFile}" open in the code viewer.]` : '';
+
+  // Build system prompt with codebase context
+  const systemPrompt = `You are CodeChat, an expert AI assistant for exploring and analyzing codebases. You are embedded in an IDE-like interface.
+
+The codebase is a mixed C++/Java/Python/C project called "myproject". Here's what you know about key files:
+
+**processor.cpp (C++)**: DataProcessor class with manual memory management. Has a potential memory leak in init() — raw pointer m_buffer is allocated but if loadConfig() throws, it's never freed. Should use std::unique_ptr.
+
+**parser.py (Python)**: CodeParser class supporting multi-language parsing. Uses Python's ast module for Python, Tree-sitter for Java/C/C++, and regex fallback. Has high cyclomatic complexity in parseInput().
+
+**Engine.java (Java)**: Core orchestration class. Manages Scheduler and DataStore. Has start() which initializes both and calls runMainLoop().
+
+**Code health issues**: 
+- 7 code smells (2 critical, 3 major, 2 minor)
+- Complexity grade B (avg 14.2 per function)
+- 3.2% duplication
+- 61% test coverage
+
+Guidelines:
+- Be concise, precise, and developer-focused
+- Use code blocks with proper syntax highlighting hints when showing code
+- Reference specific file names and line numbers when relevant (use format "filename.ext:line")
+- Point out potential issues or improvements naturally
+- Format code examples properly
+- When discussing code structure, be concrete about which functions/classes are involved
+${ctxNote}`;
+
+  // Show thinking
+  const thinkEl = addThinking();
+
+  try {
+    const messages = [
+      ...chatHistory.map(h => ({ role: h.role, content: h.content })),
+      { role: 'user', content: q }
+    ];
+
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 1000,
+        system: systemPrompt,
+        messages
+      })
+    });
+
+    const data = await res.json();
+    thinkEl.remove();
+
+    if (data.content && data.content[0]) {
+      const text = data.content[0].text;
+      chatHistory.push({ role: 'user', content: q });
+      chatHistory.push({ role: 'assistant', content: text });
+      if (chatHistory.length > 20) chatHistory = chatHistory.slice(-20);
+
+      // Detect file references to show chunks
+      const chunks = detectChunks(q + ' ' + text);
+      addAIMsg(text, chunks);
+    } else {
+      addAIMsg('Sorry, I encountered an issue. Please try again.', []);
+    }
+  } catch(err) {
+    thinkEl.remove();
+    addAIMsg(`Connection error: ${err.message}. Make sure you're running in the Claude.ai environment.`, []);
+  }
+
+  isLoading = false;
+  document.getElementById('sendBtn').disabled = false;
+}
+
+function detectChunks(text) {
+  const chunks = [];
+  const lowerText = text.toLowerCase();
+
+  if (lowerText.includes('processor') || lowerText.includes('memory') || lowerText.includes('leak') || lowerText.includes('m_buffer') || lowerText.includes('init')) {
+    chunks.push({ file:'processor.cpp', lang:'cpp', sym:'DataProcessor::init', start:12, end:17 });
+  }
+  if (lowerText.includes('destructor') || lowerText.includes('~')) {
+    chunks.push({ file:'processor.cpp', lang:'cpp', sym:'~DataProcessor', start:28, end:30 });
+  }
+  if (lowerText.includes('parser') || lowerText.includes('parse') || lowerText.includes('ast') || lowerText.includes('tree-sitter')) {
+    chunks.push({ file:'parser.py', lang:'py', sym:'CodeParser.parse', start:15, end:21 });
+  }
+  if (lowerText.includes('engine') || lowerText.includes('entry') || lowerText.includes('start') || lowerText.includes('main')) {
+    chunks.push({ file:'Engine.java', lang:'java', sym:'Engine.start', start:16, end:21 });
+  }
+  if (lowerText.includes('scheduler') || lowerText.includes('task')) {
+    chunks.push({ file:'Engine.java', lang:'java', sym:'Engine.runMainLoop', start:23, end:28 });
+  }
+  return chunks.slice(0, 3);
+}
+
+function addUserMsg(text) {
+  const msgs = document.getElementById('messages');
+  const el = document.createElement('div');
+  el.className = 'msg';
+  el.innerHTML = `<div class="avatar av-user">YOU</div><div class="msg-body"><div class="msg-meta"><span class="msg-name">You</span><span class="msg-time">${now()}</span></div><div class="msg-content"><p>${escHtml(text)}</p></div></div>`;
+  msgs.appendChild(el);
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+function addThinking() {
+  const msgs = document.getElementById('messages');
+  const el = document.createElement('div');
+  el.className = 'think-wrap';
+  el.innerHTML = `<div class="avatar av-ai">AI</div><div class="msg-body"><div class="msg-meta"><span class="msg-name">CodeChat AI</span><span class="msg-badge thinking">analyzing</span></div><div style="display:flex;align-items:center;gap:10px;margin-top:4px"><div class="think-dots"><span></span><span></span><span></span></div><span class="think-text">Retrieving relevant code chunks…</span></div></div>`;
+  msgs.appendChild(el);
+  msgs.scrollTop = msgs.scrollHeight;
+  // Cycle through thinking steps
+  const steps = ['Retrieving relevant code chunks…','Running semantic search…','Analyzing AST context…','Synthesizing answer…'];
+  let si = 0;
+  el._iv = setInterval(() => {
+    si = (si+1) % steps.length;
+    const t = el.querySelector('.think-text');
+    if (t) { t.style.opacity='0'; setTimeout(()=>{ t.textContent = steps[si]; t.style.opacity='1'; }, 150); }
+  }, 900);
+  return el;
+}
+
+function addAIMsg(rawText, chunks) {
+  const msgs = document.getElementById('messages');
+  const el = document.createElement('div');
+  el.className = 'msg';
+
+  const formatted = formatMessage(rawText);
+
+  let chunkHtml = '';
+  if (chunks.length) {
+    const crows = chunks.map(c => `
+      <div class="chunk" onclick="jumpToChunk('${c.file}','${c.lang}',${c.start},${c.end})">
+        <div class="chunk-lang-dot ${LANG_DOT[c.lang]}"></div>
+        <span class="chunk-file">${c.file}</span>
+        <span class="chunk-sym">:: ${c.sym}</span>
+        <span class="chunk-lines">L${c.start}–${c.end}</span>
+      </div>`).join('');
+    chunkHtml = `<div class="chunk-section"><div class="chunk-label">Referenced code — click to view</div><div class="chunks">${crows}</div></div>`;
+  }
+
+  el.innerHTML = `<div class="avatar av-ai">AI</div><div class="msg-body"><div class="msg-meta"><span class="msg-name">CodeChat AI</span><span class="msg-time">${now()}</span>${chunks.length ? `<span class="msg-badge">${chunks.length} chunk${chunks.length>1?'s':''} retrieved</span>` : ''}</div><div class="msg-content">${formatted}${chunkHtml}</div></div>`;
+  msgs.appendChild(el);
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+function jumpToChunk(filename, lang, start, end) {
+  const fileObj = FILES.find(f => f.name === filename);
+  if (fileObj) {
+    openFileInViewer(fileObj, start, end);
+    toast(`Jumped to ${filename}:${start}–${end}`);
+  }
+}
+
+function formatMessage(text) {
+  // Process markdown-like formatting
+  let html = '';
+  const lines = text.split('\n');
+  let inCode = false;
+  let codeBuf = [];
+  let codeLang = '';
+  let inList = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.startsWith('```')) {
+      if (!inCode) {
+        inCode = true;
+        codeLang = line.slice(3).trim() || 'code';
+        codeBuf = [];
+        if (inList) { html += '</ul>'; inList = false; }
+      } else {
+        inCode = false;
+        const code = escHtml(codeBuf.join('\n'));
+        html += `<pre><div class="pre-header"><span class="pre-lang">${codeLang}</span><button class="pre-copy" onclick="copyCode(this,'${btoa(encodeURIComponent(codeBuf.join('\n')))}')">copy</button></div><code>${code}</code></pre>`;
+        codeBuf = []; codeLang = '';
+      }
+      continue;
+    }
+    if (inCode) { codeBuf.push(line); continue; }
+
+    if (line.startsWith('- ') || line.startsWith('• ')) {
+      if (!inList) { html += '<ul style="padding-left:16px;margin:6px 0">'; inList = true; }
+      html += `<li style="margin:2px 0;font-size:12px;color:var(--text0)">${md(line.slice(2))}</li>`;
+    } else {
+      if (inList) { html += '</ul>'; inList = false; }
+      if (line.match(/^#{1,3} /)) {
+        html += `<p style="font-family:var(--sans);font-size:13px;font-weight:600;color:var(--text0);margin:8px 0 4px">${md(line.replace(/^#+ /,''))}</p>`;
+      } else if (line.trim() === '') {
+        html += '';
+      } else {
+        html += `<p>${md(line)}</p>`;
+      }
+    }
+  }
+  if (inList) html += '</ul>';
+  return html;
+}
+
+function md(text) {
+  return escHtml(text)
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g, '<em>$1</em>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>');
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function copyCode(btn, b64) {
+  try {
+    const text = decodeURIComponent(atob(b64));
+    navigator.clipboard.writeText(text).then(() => {
+      btn.textContent = 'copied!';
+      setTimeout(() => btn.textContent = 'copy', 1500);
+    });
+  } catch(e) {}
+}
+
+// ─── TOAST ───────────────────────────────────────────────────────────────
+let toastTimer;
+function toast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 2000);
+}
+
+// ─── INIT ────────────────────────────────────────────────────────────────
+buildTree();
+// Open default file
+const defaultFile = FILES.find(f => f.name === 'processor.cpp');
+if (defaultFile) openFileInViewer(defaultFile, 12, 17);
+</script>
+</body>
+</html>

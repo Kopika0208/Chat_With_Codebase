@@ -454,3 +454,42 @@ def extract_python_symbols(file_path: str, source_code: str) -> SymbolTable:
         print(f"⚠️ Error extracting symbols from {file_path}: {e}")
     
     return symbol_table
+
+
+def extract_symbols_unified(file_path: str, source_code: str, language: Optional[str] = None) -> SymbolTable:
+    """
+    Unified symbol extraction for ANY language.
+    
+    Uses:
+    - Python AST for Python code (more accurate, full semantic analysis)
+    - Tree-sitter semantic analyzer for all other languages (Java, C++, JavaScript, etc.)
+    
+    Args:
+        file_path: Path to the source file
+        source_code: Content of the source file
+        language: Optional language hint (auto-detected from file extension if not provided)
+    
+    Returns:
+        Populated SymbolTable with symbols, scopes, and type information
+    
+    Supported Languages:
+        - Python (via AST)
+        - Java (via Tree-sitter)
+        - C/C++ (via Tree-sitter)
+        - JavaScript/TypeScript (via Tree-sitter)
+        - Go (via Tree-sitter)
+        - Rust (via Tree-sitter)
+    """
+    # For Python, use the native AST analyzer
+    if file_path.endswith(".py"):
+        return extract_python_symbols(file_path, source_code)
+    
+    # For other languages, use Tree-sitter semantic analyzer
+    try:
+        from .semantic_analyzer import TreeSitterSemanticAnalyzer
+        analyzer = TreeSitterSemanticAnalyzer(file_path, source_code, language)
+        return analyzer.extract_symbols()
+    except Exception as e:
+        print(f"⚠️ Tree-sitter semantic analysis failed for {file_path}: {e}")
+        # Return empty symbol table on failure
+        return SymbolTable(file_path)
