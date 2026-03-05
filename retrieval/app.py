@@ -76,6 +76,7 @@ from onboarding import (
 )
 from code_health.visualization import render_code_health_tab
 from contributions_viz import render_contributions_tab
+from contributions_analyzer import load_contributions_analyzer, ContributionsDataAnalyzer
 
 # ===============================
 # ⚙️ SETUP
@@ -103,7 +104,7 @@ if "last_active_repo" not in st.session_state:
 
 
 # ===============================
-# 🧠 LLM PROMPT TEMPLATE
+# 🧠 LLM PROMPT TEMPLATES
 # ===============================
 prompt = ChatPromptTemplate.from_template(
     """
@@ -128,6 +129,30 @@ Respond with:
 - **Navigation Tips:** Which files/functions to open first and why.
 
 If you are uncertain or the context is insufficient, clearly say so and suggest where the developer should manually inspect.
+"""
+)
+
+# Prompt for contribution/git history queries
+contribution_prompt = ChatPromptTemplate.from_template(
+    """
+You are an expert assistant analyzing code contributions and git history.
+
+Based on the contribution data provided, answer the following question about project development, commits, authors, and contribution patterns.
+
+<contribution_context>
+{contribution_context}
+</contribution_context>
+
+Question: {input}
+
+Provide a comprehensive answer including:
+- **Direct Answer:** Clearly address the question asked.
+- **Key Metrics:** Share relevant statistics (commits, authors, files changed, lines added/deleted).
+- **Insights:** Provide analysis about development patterns, activity trends, or contributor involvement.
+- **Timeline:** If relevant, mention when changes occurred.
+- **Related Information:** Provide any additional context that helps understand the project's development history.
+
+Be precise, data-driven, and help the developer understand the project's development progress and team contributions.
 """
 )
 
@@ -491,12 +516,26 @@ run_query = st.button("🚀 Run Query", type="primary")
 
 
 # ======================================================
-# 🚀 GRAPH-RAG QUERY PIPELINE
+# 🚀 GRAPH-RAG QUERY PIPELINE WITH CONTRIBUTION SUPPORT
 # ======================================================
 def run_graph_rag_pipeline(query: str, repo_name: str, enable_query_rewrite: bool, max_depth: int, 
                           strategy: str) -> dict:
-    """Execute Graph-RAG query pipeline."""
+    """Execute Graph-RAG query pipeline with contribution analysis support."""
     try:
+        print("[App] Initializing contribution analyzer...")
+        contrib_analyzer = load_contributions_analyzer(repo_name)
+        
+        # Check if this is a contribution-related query
+        is_contribution_query = contrib_analyzer.is_contribution_query(query)
+        print(f"[App] Is contribution query: {is_contribution_query}")
+        print(f"[App] Query: '{query}'")
+        
+        if is_contribution_query:
+            print("[App] 🎯 Running contribution-focused query...")
+            st.info("🎯 Detected contribution query. Using git history analysis...")
+            return _run_contribution_query(query, repo_name, contrib_analyzer)
+        
+        # Otherwise, run standard Graph-RAG pipeline
         print("[App] Initializing Graph-RAG retriever...")
         retriever = get_graph_rag_retriever(repo_name)
         if not retriever:
@@ -571,6 +610,56 @@ def run_graph_rag_pipeline(query: str, repo_name: str, enable_query_rewrite: boo
     
     except Exception as e:
         st.error(f"❌ Error in Graph-RAG pipeline: {type(e).__name__}: {e}")
+        st.text(traceback.format_exc())
+        return None
+
+
+def _run_contribution_query(query: str, repo_name: str, contrib_analyzer: ContributionsDataAnalyzer) -> dict:
+    """Handle contribution/git history queries."""
+    try:
+        print("[App] Processing contribution query...")
+        
+        # Generate contribution context based on query
+        contribution_context = contrib_analyzer.generate_contribution_context(query)
+        
+        if not contribution_context:
+            st.warning("⚠️ No contribution data available for this repository.")
+            return None
+        
+        # Get LLM answer using contribution prompt
+        llm = get_llm()
+        response = llm.invoke(
+            contribution_prompt.format_prompt(
+                contribution_context=contribution_context,
+                input=query,
+            ).to_messages()
+        )
+        answer = response.content.strip()
+        
+        # Create a minimal doc entry for display
+        from langchain_core.documents import Document
+        contrib_doc = Document(
+            page_content=contribution_context,
+            metadata={
+                "path": "contribution_analysis",
+                "symbol_name": "git_history",
+                "start_line": 0,
+                "end_line": 0,
+                "parser_used": "contribution_analyzer",
+                "language": "json"
+            }
+        )
+        
+        return {
+            "answer": answer,
+            "final_docs": [contrib_doc],
+            "context": contribution_context,
+            "sources": "Git Commit History",
+            "is_contribution_query": True,
+        }
+    
+    except Exception as e:
+        st.error(f"❌ Error in contribution query: {type(e).__name__}: {e}")
         st.text(traceback.format_exc())
         return None
 

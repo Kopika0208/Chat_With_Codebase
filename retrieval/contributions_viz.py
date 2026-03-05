@@ -159,36 +159,56 @@ def render_contributions_tab(repo_name: str):
                 
                 st.divider()
                 
-                # Recent commits
-                recent_commits = author_data.get("recent_commits", [])
-                if recent_commits:
-                    st.markdown("**Recent Commits:**")
-                    for commit in recent_commits:
-                        commit_sha = commit.get("sha", "?")
-                        commit_msg = commit.get("message", "No message")
-                        commit_date = commit.get("date", "?")
-                        
-                        # Format date for display
-                        try:
-                            dt = datetime.fromisoformat(commit_date)
-                            date_str = dt.strftime("%Y-%m-%d %H:%M")
-                        except:
-                            date_str = commit_date
-                        
-                        st.write(f"**{commit_msg}** `{commit_sha}` ({date_str})")
-                
                 # Display contribution period
                 first_commit = author_data.get("first_commit")
                 last_commit = author_data.get("last_commit")
                 
                 if first_commit and last_commit:
-                    st.divider()
-                    try:
-                        first_dt = datetime.fromisoformat(first_commit).strftime("%Y-%m-%d")
-                        last_dt = datetime.fromisoformat(last_commit).strftime("%Y-%m-%d")
-                        st.write(f"**Active Period:** {first_dt} to {last_dt}")
-                    except:
-                        st.write(f"**Active Period:** {first_commit} to {last_commit}")
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        try:
+                            first_dt = datetime.fromisoformat(first_commit.replace('Z', '+00:00'))
+                            st.metric("First Commit", first_dt.strftime("%Y-%m-%d"))
+                        except:
+                            st.metric("First Commit", first_commit)
+                    
+                    with col2:
+                        try:
+                            last_dt = datetime.fromisoformat(last_commit.replace('Z', '+00:00'))
+                            st.metric("Last Commit", last_dt.strftime("%Y-%m-%d"))
+                        except:
+                            st.metric("Last Commit", last_commit)
+                
+                st.divider()
+                
+                # Recent commits timeline
+                recent_commits = author_data.get("recent_commits", [])
+                if recent_commits:
+                    st.markdown("**📅 Recent Commits Timeline:**")
+                    
+                    # Sort commits by date (most recent first)
+                    sorted_commits = sorted(
+                        recent_commits,
+                        key=lambda x: datetime.fromisoformat(
+                            x.get("date", "").replace('Z', '+00:00')
+                        ) if x.get("date") else datetime.min,
+                        reverse=True
+                    )
+                    
+                    for commit in sorted_commits[:10]:
+                        commit_sha = commit.get("sha", "?")[:7]
+                        commit_msg = commit.get("message", "No message")
+                        commit_date = commit.get("date", "?")
+                        
+                        # Format date for display
+                        try:
+                            dt = datetime.fromisoformat(commit_date.replace('Z', '+00:00'))
+                            date_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+                            date_badge = f"🕐 {date_str}"
+                        except:
+                            date_badge = f"🕐 {commit_date}"
+                        
+                        st.write(f"{date_badge} | `{commit_sha}` **{commit_msg[:50]}**")
     
     st.divider()
     
@@ -224,13 +244,37 @@ def render_contributions_tab(repo_name: str):
     except Exception as e:
         st.warning(f"Could not render chart: {e}")
     
-    # ========== COMMIT ACTIVITY ==========
-    st.markdown("### 📅 Commits Over Time")
+    # ========== COMMIT ACTIVITY & TIMELINE ==========
+    st.markdown("### 📅 Project Timeline & Commit Activity")
     
-    # Group commits by author for timeline
     st.write(f"**Repository has {total_commits} commits from {total_authors} authors**")
     
-    # Create a simple text timeline
+    # Get earliest and latest commits from authors data
+    all_dates = []
+    for author_data in authors.values():
+        first = author_data.get("first_commit")
+        last = author_data.get("last_commit")
+        if first:
+            try:
+                all_dates.append(datetime.fromisoformat(first.replace('Z', '+00:00')))
+            except:
+                pass
+        if last:
+            try:
+                all_dates.append(datetime.fromisoformat(last.replace('Z', '+00:00')))
+            except:
+                pass
+    
+    if all_dates:
+        earliest = min(all_dates)
+        latest = max(all_dates)
+        days_span = (latest - earliest).days
+        st.metric("📊 Project Timeline Span", f"{days_span} days ({earliest.strftime('%Y-%m-%d')} → {latest.strftime('%Y-%m-%d')})")
+    
+    st.divider()
+    
+    # Commit distribution timeline
+    st.write("**📈 Commit Distribution by Author:**")
     for rank, (author_email, author_data) in enumerate(sorted_authors[:5], 1):
         author_name = author_email
         if author_data.get("recent_commits"):
@@ -239,7 +283,64 @@ def render_contributions_tab(repo_name: str):
         commits_count = author_data.get("commits", 0)
         percentage = (commits_count / total_commits * 100) if total_commits > 0 else 0
         
-        # Create a progress bar
-        st.write(f"{author_name}: {commits_count} commits ({percentage:.1f}%)")
+        # Get author's contribution period
+        first_commit = author_data.get("first_commit")
+        last_commit = author_data.get("last_commit")
+        
+        period_str = ""
+        if first_commit and last_commit:
+            try:
+                first_dt = datetime.fromisoformat(first_commit.replace('Z', '+00:00'))
+                last_dt = datetime.fromisoformat(last_commit.replace('Z', '+00:00'))
+                period_str = f" ({first_dt.strftime('%Y-%m-%d')} to {last_dt.strftime('%Y-%m-%d')})"
+            except:
+                pass
+        
+        st.write(f"**{rank}. {author_name}**: {commits_count} commits ({percentage:.1f}%){period_str}")
         st.progress(commits_count / max(c for _, c in [(e, a.get("commits", 0)) for e, a in sorted_authors[:5]]))
-        st.write("")
+    
+    st.divider()
+    
+    # Recent commits timeline across all authors
+    st.markdown("### ⏱️ Recent Commits Timeline (All Authors)")
+    
+    try:
+        # Collect all commits from all authors
+        all_commits_list = []
+        for email, author_data in authors.items():
+            recent_commits = author_data.get("recent_commits", [])
+            for commit in recent_commits:
+                commit['author_email'] = email
+                all_commits_list.append(commit)
+        
+        # Sort by date (most recent first)
+        all_commits_list.sort(
+            key=lambda x: datetime.fromisoformat(
+                x.get("date", "").replace('Z', '+00:00')
+            ) if x.get("date") else datetime.min,
+            reverse=True
+        )
+        
+        # Show top 15 most recent commits
+        for commit in all_commits_list[:15]:
+            author_email = commit.get('author_email', 'Unknown')
+            author_name = author_email
+            if authors.get(author_email, {}).get("recent_commits"):
+                author_name = authors[author_email]["recent_commits"][0].get("author_name", author_email)
+            
+            commit_sha = commit.get("sha", "?")[:7]
+            commit_msg = commit.get("message", "No message")[:60]
+            commit_date = commit.get("date", "?")
+            
+            try:
+                dt = datetime.fromisoformat(commit_date.replace('Z', '+00:00'))
+                date_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+                relative_info = f"({(datetime.fromisoformat(commit_date.replace('Z', '+00:00'))).strftime('%a %b %d, %Y')})"
+            except:
+                date_str = commit_date
+                relative_info = ""
+            
+            st.write(f"🕐 `{date_str}` | `{commit_sha}` | **{author_name}**: {commit_msg}...")
+    
+    except Exception as e:
+        st.warning(f"Could not load recent commits timeline: {e}")
