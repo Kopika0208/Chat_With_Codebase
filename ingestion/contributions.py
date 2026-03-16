@@ -52,7 +52,8 @@ class ContributionsAnalyzer:
                 if idx % 100 == 0:
                     print(f"  Processing commit {idx}/{len(commits)}...")
                 
-                author = commit.author.email if commit.author else "Unknown"
+                # Normalize email to lowercase to handle case-sensitivity issues
+                author = (commit.author.email if commit.author else "Unknown").lower()
                 author_name = commit.author.name if commit.author else "Unknown"
                 
                 # Update commit count
@@ -67,27 +68,38 @@ class ContributionsAnalyzer:
                 # Get diff stats
                 try:
                     if commit.parents:
-                        diffs = commit.parents[0].diff(commit)
-                        for diff in diffs:
-                            # Track files changed
-                            if diff.b_path:
-                                self.contributions[author]["files_changed"].add(diff.b_path)
-                            
-                            # Count lines added/deleted
-                            if diff.diff:
-                                lines = diff.diff.decode('utf-8', errors='ignore').split('\n')
-                                for line in lines:
-                                    if line.startswith('+') and not line.startswith('+++'):
-                                        self.contributions[author]["lines_added"] += 1
-                                    elif line.startswith('-') and not line.startswith('---'):
-                                        self.contributions[author]["lines_deleted"] += 1
+                        # Use git diff command with --numstat for accurate line counts
+                        diff_output = self.repo.git.diff(
+                            commit.parents[0].hexsha, 
+                            commit.hexsha, 
+                            numstat=True
+                        )
+                        
+                        if diff_output:
+                            for line in diff_output.split('\n'):
+                                if line.strip():
+                                    parts = line.split('\t')
+                                    if len(parts) >= 3:
+                                        try:
+                                            added = int(parts[0]) if parts[0] != '-' else 0
+                                            deleted = int(parts[1]) if parts[1] != '-' else 0
+                                            file_path = parts[2]
+                                            
+                                            self.contributions[author]["lines_added"] += added
+                                            self.contributions[author]["lines_deleted"] += deleted
+                                            self.contributions[author]["files_changed"].add(file_path)
+                                        except (ValueError, IndexError):
+                                            pass
                     else:
-                        # Initial commit - count all files as changed
+                        # Initial commit - count all tracked files as changed
                         if commit.tree:
-                            self.contributions[author]["files_changed"].update(
-                                [item.path for item in commit.tree.traverse()]
-                            )
-                            self.contributions[author]["lines_added"] += 1000  # Approximate
+                            file_count = 0
+                            for item in commit.tree.traverse():
+                                if item.type == 'blob':
+                                    self.contributions[author]["files_changed"].add(item.path)
+                                    file_count += 1
+                            # Estimate lines for initial commit based on file count
+                            self.contributions[author]["lines_added"] += file_count * 10  # Average estimate
                 except Exception as e:
                     print(f"  ⚠️ Error processing diff for commit {commit.hexsha[:7]}: {e}")
                 
@@ -107,13 +119,43 @@ class ContributionsAnalyzer:
     
     def _compile_statistics(self) -> Dict:
         """Compile final contribution statistics."""
+        # Deduplicate authors by comparing lowercased emails
+        deduped_contributions = {}
+        email_mapping = {}  # Maps original email to canonical (first seen) email
+        
+        for author, data in self.contributions.items():
+            author_lower = author.lower()
+            
+            if author_lower not in email_mapping:
+                # First occurrence of this email (case-insensitive)
+                email_mapping[author_lower] = author
+                deduped_contributions[author] = data
+            else:
+                # Duplicate found - merge stats with existing record
+                canonical_author = email_mapping[author_lower]
+                deduped_contributions[canonical_author]["commits"] += data["commits"]
+                deduped_contributions[canonical_author]["files_changed"].update(data["files_changed"])
+                deduped_contributions[canonical_author]["lines_added"] += data["lines_added"]
+                deduped_contributions[canonical_author]["lines_deleted"] += data["lines_deleted"]
+                
+                # Update first/last commits
+                if data["first_commit"] and (not deduped_contributions[canonical_author]["first_commit"] or 
+                    data["first_commit"] < deduped_contributions[canonical_author]["first_commit"]):
+                    deduped_contributions[canonical_author]["first_commit"] = data["first_commit"]
+                if data["last_commit"] and (not deduped_contributions[canonical_author]["last_commit"] or 
+                    data["last_commit"] > deduped_contributions[canonical_author]["last_commit"]):
+                    deduped_contributions[canonical_author]["last_commit"] = data["last_commit"]
+                
+                # Merge commit details
+                deduped_contributions[canonical_author]["commit_details"].extend(data["commit_details"])
+        
         stats = {
-            "total_authors": len(self.contributions),
-            "total_commits": sum(c["commits"] for c in self.contributions.values()),
+            "total_authors": len(deduped_contributions),
+            "total_commits": sum(c["commits"] for c in deduped_contributions.values()),
             "authors": {}
         }
         
-        for author, data in self.contributions.items():
+        for author, data in deduped_contributions.items():
             stats["authors"][author] = {
                 "commits": data["commits"],
                 "files_changed": len(data["files_changed"]),
@@ -122,7 +164,7 @@ class ContributionsAnalyzer:
                 "net_lines": data["lines_added"] - data["lines_deleted"],
                 "first_commit": data["first_commit"].isoformat() if data["first_commit"] else None,
                 "last_commit": data["last_commit"].isoformat() if data["last_commit"] else None,
-                "recent_commits": data["commit_details"][-5:]  # Last 5 commits
+                "recent_commits": sorted(data["commit_details"], key=lambda x: x.get("date", ""), reverse=True)[-5:]  # Last 5 commits
             }
         
         # Sort by commits descending

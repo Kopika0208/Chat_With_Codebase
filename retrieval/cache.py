@@ -42,9 +42,12 @@ def get_repo_paths(repo_name: str):
         "base": base,
         "vector": os.path.join(base, "vector_store"),
         "callgraph": os.path.join(base, "call_graph.json"),
+        "bootchain": os.path.join(base, "boot_chain.json"),
+        "corestructures": os.path.join(base, "core_structures.json"),
         "knowledge": os.path.join(base, "knowledge_graph.json"),
         "symbol": os.path.join(base, "symbol_table.json"),
         "dataflow": os.path.join(base, "dataflow_analysis.json"),
+        "asyncpatterns": os.path.join(base, "async_patterns.json"),
     }
 
 
@@ -58,6 +61,32 @@ def load_call_graph_cached(repo_name: str):
         return None
     with open(paths["callgraph"], "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+@st.cache_data(show_spinner=False)
+def load_boot_chain_cached(repo_name: str):
+    paths = get_repo_paths(repo_name)
+    if not os.path.exists(paths["bootchain"]):
+        return {}
+    try:
+        with open(paths["bootchain"], "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"⚠️ Failed to load boot chain for {repo_name}: {e}")
+        return {}
+
+
+@st.cache_data(show_spinner=False)
+def load_core_structures_cached(repo_name: str):
+    paths = get_repo_paths(repo_name)
+    if not os.path.exists(paths["corestructures"]):
+        return {}
+    try:
+        with open(paths["corestructures"], "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"Failed to load core structures for {repo_name}: {e}")
+        return {}
 
 
 @st.cache_data(show_spinner=False)
@@ -115,6 +144,19 @@ def load_dataflow_data_cached(repo_name: str):
 # ======================================================
 # 🔢 EMBEDDINGS & VECTORSTORE
 # ======================================================
+@st.cache_data(show_spinner=False)
+def load_async_patterns_cached(repo_name: str):
+    paths = get_repo_paths(repo_name)
+    if not os.path.exists(paths["asyncpatterns"]):
+        return {}
+    try:
+        with open(paths["asyncpatterns"], "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"Failed to load async patterns for {repo_name}: {e}")
+        return {}
+
+
 @st.cache_resource(show_spinner=False)
 def get_embeddings():
     return HuggingFaceEmbeddings(model_name=EMBED_MODEL)

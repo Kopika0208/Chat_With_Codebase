@@ -1,31 +1,146 @@
 """
 Enhanced Code Health Analysis Module.
 Provides deeper insights into code quality with detailed metrics and actionable recommendations.
+Supports multi-language analysis with language-specific thresholds.
 """
 
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 from collections import defaultdict
 import statistics
+from pathlib import Path
 
 
 class EnhancedHealthAnalyzer:
-    """Advanced health analysis with detailed metrics."""
+    """Advanced health analysis with detailed metrics and multi-language support."""
     
-    HEALTH_THRESHOLDS = {
-        'cyclomatic_complexity': {'ideal': 3, 'warning': 7, 'critical': 15},
-        'lines_per_function': {'ideal': 15, 'warning': 50, 'critical': 100},
-        'lines_per_class': {'ideal': 100, 'warning': 300, 'critical': 500},
-        'function_parameters': {'ideal': 3, 'warning': 5, 'critical': 7},
-        'docstring_coverage': {'ideal': 0.80, 'warning': 0.50, 'critical': 0.20},
-        'comment_ratio': {'ideal': 0.15, 'warning': 0.05, 'critical': 0.01},
-        'nesting_depth': {'ideal': 2, 'warning': 4, 'critical': 7},
+    # Language detection by file extension
+    LANGUAGE_EXTENSIONS = {
+        'python': {'.py', '.pyw'},
+        'java': {'.java'},
+        'cpp': {'.cpp', '.cc', '.cxx', '.c++', '.h', '.hpp', '.hxx'},
+        'c': {'.c', '.h'},
     }
     
-    def __init__(self, stats: Dict, call_graph: Dict, symbol_table: Dict):
-        """Initialize enhanced analyzer."""
+    # Language-specific thresholds (based on SonarQube industry standards)
+    LANGUAGE_THRESHOLDS = {
+        'python': {
+            'cyclomatic_complexity': {'ideal': 5, 'warning': 10, 'critical': 20},
+            'lines_per_function': {'ideal': 20, 'warning': 50, 'critical': 100},
+            'lines_per_class': {'ideal': 200, 'warning': 400, 'critical': 800},
+            'function_parameters': {'ideal': 4, 'warning': 6, 'critical': 7},
+            'docstring_coverage': {'ideal': 0.80, 'warning': 0.50, 'critical': 0.20},
+            'comment_ratio': {'ideal': 0.20, 'warning': 0.15, 'critical': 0.10},
+            'nesting_depth': {'ideal': 4, 'warning': 6, 'critical': 8},
+        },
+        'java': {
+            'cyclomatic_complexity': {'ideal': 10, 'warning': 15, 'critical': 20},
+            'lines_per_function': {'ideal': 30, 'warning': 60, 'critical': 120},
+            'lines_per_class': {'ideal': 300, 'warning': 500, 'critical': 1000},
+            'function_parameters': {'ideal': 4, 'warning': 6, 'critical': 7},
+            'docstring_coverage': {'ideal': 0.80, 'warning': 0.50, 'critical': 0.20},
+            'comment_ratio': {'ideal': 0.20, 'warning': 0.15, 'critical': 0.10},
+            'nesting_depth': {'ideal': 4, 'warning': 6, 'critical': 8},
+        },
+        'cpp': {
+            'cyclomatic_complexity': {'ideal': 8, 'warning': 12, 'critical': 20},
+            'lines_per_function': {'ideal': 30, 'warning': 60, 'critical': 120},
+            'lines_per_class': {'ideal': 250, 'warning': 500, 'critical': 800},
+            'function_parameters': {'ideal': 5, 'warning': 7, 'critical': 10},
+            'docstring_coverage': {'ideal': 0.70, 'warning': 0.40, 'critical': 0.10},
+            'comment_ratio': {'ideal': 0.20, 'warning': 0.15, 'critical': 0.10},
+            'nesting_depth': {'ideal': 3, 'warning': 5, 'critical': 7},
+        },
+        'c': {
+            'cyclomatic_complexity': {'ideal': 7, 'warning': 10, 'critical': 15},
+            'lines_per_function': {'ideal': 25, 'warning': 50, 'critical': 100},
+            'lines_per_class': {'ideal': 300, 'warning': 600, 'critical': 1000},
+            'function_parameters': {'ideal': 5, 'warning': 7, 'critical': 10},
+            'docstring_coverage': {'ideal': 0.70, 'warning': 0.40, 'critical': 0.10},
+            'comment_ratio': {'ideal': 0.20, 'warning': 0.15, 'critical': 0.10},
+            'nesting_depth': {'ideal': 3, 'warning': 5, 'critical': 7},
+        },
+    }
+    
+    # Default thresholds for backward compatibility
+    HEALTH_THRESHOLDS = LANGUAGE_THRESHOLDS['python']
+    
+    def __init__(self, stats: Dict, call_graph: Dict, symbol_table: Dict, 
+                 language: Optional[str] = None):
+        """Initialize enhanced analyzer.
+        
+        Args:
+            stats: Code statistics dictionary
+            call_graph: Call graph dictionary
+            symbol_table: Symbol table dictionary
+            language: Programming language ('python', 'java', 'cpp', 'c'). 
+                     If None, auto-detects from file extensions in stats.
+        """
         self.stats = stats if isinstance(stats, dict) else {}
         self.call_graph = call_graph if isinstance(call_graph, dict) else {}
         self.symbol_table = symbol_table if isinstance(symbol_table, dict) else {}
+        self.language = language or self._detect_language()
+        self.thresholds = self.LANGUAGE_THRESHOLDS.get(self.language, self.HEALTH_THRESHOLDS)
+    
+    def _detect_language(self) -> str:
+        """Auto-detect programming language from file extensions.
+        
+        Returns:
+            Language name ('python', 'java', 'cpp', 'c', or 'python' as default)
+        """
+        file_stats = self.stats.get('file_stats', {})
+        
+        if not file_stats:
+            return 'python'  # Default to Python
+        
+        language_counts = defaultdict(int)
+        
+        for file_path in file_stats.keys():
+            ext = Path(file_path).suffix.lower()
+            for language, extensions in self.LANGUAGE_EXTENSIONS.items():
+                if ext in extensions:
+                    language_counts[language] += 1
+                    break
+        
+        if not language_counts:
+            return 'python'  # Default to Python
+        
+        # Return the most common language
+        return max(language_counts, key=language_counts.get)
+    
+    def get_language(self) -> str:
+        """Get the detected or specified language."""
+        return self.language
+    
+    def get_active_thresholds(self) -> Dict:
+        """Get the active thresholds being used for analysis.
+        
+        Returns:
+            Dictionary of thresholds for the current language
+        """
+        return self.thresholds.copy()
+    
+    def get_language_info(self) -> Dict:
+        """Get detailed information about language detection and thresholds.
+        
+        Returns:
+            Dictionary with language info, file count per language, and active thresholds
+        """
+        file_stats = self.stats.get('file_stats', {})
+        language_counts = defaultdict(int)
+        
+        for file_path in file_stats.keys():
+            ext = Path(file_path).suffix.lower()
+            for language, extensions in self.LANGUAGE_EXTENSIONS.items():
+                if ext in extensions:
+                    language_counts[language] += 1
+                    break
+        
+        return {
+            'detected_language': self.language,
+            'file_distribution': dict(language_counts),
+            'total_files': len(file_stats),
+            'active_thresholds': self.thresholds,
+        }
     
     def get_detailed_health_report(self) -> Dict:
         """Generate comprehensive health report with all metrics."""
@@ -77,7 +192,7 @@ class EnhancedHealthAnalyzer:
         avg_cc = statistics.mean(complexities) if complexities else 5
         cc_score = self._calculate_metric_score(
             avg_cc,
-            self.HEALTH_THRESHOLDS['cyclomatic_complexity']
+            self.thresholds['cyclomatic_complexity']
         )
         scores.append(('Complexity', cc_score, 0.30))
         
@@ -86,7 +201,7 @@ class EnhancedHealthAnalyzer:
         avg_func_len = statistics.mean(func_lengths) if func_lengths else 30
         func_score = self._calculate_metric_score(
             avg_func_len,
-            self.HEALTH_THRESHOLDS['lines_per_function'],
+            self.thresholds['lines_per_function'],
             inverse=True
         )
         scores.append(('Function Length', func_score, 0.20))
@@ -96,7 +211,7 @@ class EnhancedHealthAnalyzer:
         avg_doc = statistics.mean(docs) if docs else 0.3
         doc_score = self._calculate_metric_score(
             avg_doc,
-            {'ideal': 0.80, 'warning': 0.50, 'critical': 0.20},
+            self.thresholds['docstring_coverage'],
             is_percentage=True
         )
         scores.append(('Documentation', doc_score, 0.20))
@@ -182,7 +297,7 @@ class EnhancedHealthAnalyzer:
             'high_complexity_files': sum(1 for c in complexities if c > 10),
             'score': self._calculate_metric_score(
                 statistics.mean(complexities),
-                self.HEALTH_THRESHOLDS['cyclomatic_complexity']
+                self.thresholds['cyclomatic_complexity']
             ),
         }
     
@@ -207,7 +322,7 @@ class EnhancedHealthAnalyzer:
             'very_large_files': sum(1 for loc in locs if loc > 1000),
             'score': self._calculate_metric_score(
                 statistics.mean(func_lengths),
-                self.HEALTH_THRESHOLDS['lines_per_function'],
+                self.thresholds['lines_per_function'],
                 inverse=True
             ),
         }
@@ -229,7 +344,7 @@ class EnhancedHealthAnalyzer:
             'comment_ratio': repo_stats.get('comment_to_code_ratio', 0),
             'score': self._calculate_metric_score(
                 statistics.mean(docs),
-                {'ideal': 0.80, 'warning': 0.50, 'critical': 0.20},
+                self.thresholds['docstring_coverage'],
                 is_percentage=True
             ),
         }

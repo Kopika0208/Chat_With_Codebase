@@ -1,16 +1,29 @@
 """
 Code Smell Detection.
 Identifies common code smells using heuristics and metrics.
+Uses LLM (Groq) for context-aware pattern analysis with fallback to hardcoded detection.
 """
 
-from typing import Dict, List
+from typing import Dict, List, Optional
 import re
+import json
+import os
+
+# Try to import LLM from cache, fallback to None if unavailable
+try:
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+    from retrieval.cache import get_llm
+    HAS_LLM = True
+except Exception:
+    get_llm = None
+    HAS_LLM = False
 
 
 class CodeSmellDetector:
     """Detects common code smells."""
     
-    def __init__(self, stats: Dict, call_graph: Dict, symbol_table: Dict, repo_path: str):
+    def __init__(self, stats: Dict, call_graph: Dict, symbol_table: Dict, repo_path: str, use_llm: bool = True):
         """
         Initialize smell detector.
         
@@ -19,12 +32,22 @@ class CodeSmellDetector:
             call_graph: Call graph data
             symbol_table: Symbol table data
             repo_path: Path to repository
+            use_llm: Whether to use LLM for enhanced analysis
         """
         self.stats = stats if isinstance(stats, dict) else {}
         self.call_graph = call_graph if isinstance(call_graph, dict) else {}
         self.symbol_table = symbol_table if isinstance(symbol_table, dict) else {}
         self.repo_path = repo_path
         self.detected_smells = []
+        self.use_llm = use_llm and HAS_LLM
+        self.llm = None
+        
+        if self.use_llm:
+            try:
+                self.llm = get_llm()
+            except Exception:
+                self.use_llm = False
+                self.llm = None
     
     def detect_all_smells(self) -> List[Dict]:
         """Detect all code smells."""
@@ -37,6 +60,7 @@ class CodeSmellDetector:
         self._detect_unused_code()
         self._detect_orphaned_files()
         self._detect_hotspots()
+        self._detect_design_patterns()
         
         return self.detected_smells
     
@@ -259,3 +283,170 @@ class CodeSmellDetector:
                 'why_problem': "Hotspot files are high-risk: changes are frequent and error-prone. "
                              "They accumulate complexity and create maintenance burden.",
             })
+    
+    def _detect_design_patterns(self):
+        """Detect common design patterns with LLM enhancement."""
+        patterns_detected = self._detect_raw_design_patterns()
+        
+        # Try LLM enhancement if available
+        if self.use_llm and self.llm and patterns_detected:
+            enhanced = self._enhance_patterns_with_llm(patterns_detected)
+            if enhanced:
+                self.detected_smells.append(enhanced)
+                return
+        
+        # Fallback to basic pattern reporting
+        if patterns_detected:
+            self.detected_smells.append({
+                'type': 'Design Patterns Detected',
+                'file': 'Architecture',
+                'severity': 'info',
+                'description': f"Detected {len(patterns_detected)} design patterns in codebase.",
+                'patterns': patterns_detected,
+                'metrics': {
+                    'total_patterns': len(patterns_detected),
+                    'pattern_types': list(set(p['pattern'] for p in patterns_detected)),
+                },
+                'why_problem': "Design patterns indicate architectural structure. This is informational.",
+            })
+    
+    def _detect_raw_design_patterns(self) -> List[Dict]:
+        """Detect raw design patterns without LLM."""
+        symbol_table = self.symbol_table
+        patterns_detected = []
+        
+        if not symbol_table:
+            return patterns_detected
+        
+        # Pattern 1: Singleton Detection
+        for symbol_name, symbol_data in symbol_table.items():
+            if isinstance(symbol_data, dict) and symbol_data.get('kind') == 'class':
+                class_name = symbol_name.split('::')[-1] if '::' in symbol_name else symbol_name
+                has_private_constructor = any(
+                    '__init__' in s or 'private' in str(s)
+                    for s in symbol_table.keys()
+                    if class_name in str(s)
+                )
+                has_static_getter = any(
+                    ('instance' in s.lower() or 'getinstance' in s.lower())
+                    and ('static' in str(symbol_table.get(s, {})) or s.startswith('get_'))
+                    for s in symbol_table.keys()
+                    if class_name in str(s)
+                )
+                if has_private_constructor and has_static_getter:
+                    patterns_detected.append({
+                        'pattern': 'Singleton',
+                        'location': symbol_name,
+                        'confidence': 0.85,
+                        'description': f"Class {class_name} shows Singleton pattern characteristics.",
+                    })
+        
+        # Pattern 2: Factory Pattern Detection
+        for symbol_name in symbol_table.keys():
+            if isinstance(symbol_name, str):
+                if any(pattern in symbol_name.lower() for pattern in ['create_', 'make_', 'factory']):
+                    if 'static' in str(symbol_table.get(symbol_name, {})):
+                        patterns_detected.append({
+                            'pattern': 'Factory',
+                            'location': symbol_name,
+                            'confidence': 0.80,
+                            'description': f"Method {symbol_name} matches Factory pattern.",
+                        })
+        
+        # Pattern 3: Observer Pattern Detection
+        has_subscribe = any(
+            'subscribe' in s.lower() or 'add_listener' in s.lower() or 'attach' in s.lower()
+            for s in symbol_table.keys()
+        )
+        has_notify = any(
+            'notify' in s.lower() or 'fire' in s.lower() or 'emit' in s.lower()
+            for s in symbol_table.keys()
+        )
+        if has_subscribe and has_notify:
+            patterns_detected.append({
+                'pattern': 'Observer',
+                'location': 'Multiple classes',
+                'confidence': 0.70,
+                'description': "Codebase shows Observer pattern.",
+            })
+        
+        # Pattern 4: Adapter/Wrapper Detection
+        adapter_candidates = [
+            s for s in symbol_table.keys()
+            if isinstance(s, str) and ('adapter' in s.lower() or 'wrapper' in s.lower())
+        ]
+        if adapter_candidates:
+            patterns_detected.append({
+                'pattern': 'Adapter/Wrapper',
+                'location': ', '.join(adapter_candidates[:3]),
+                'confidence': 0.75,
+                'examples': adapter_candidates[:5],
+                'description': f"Found {len(adapter_candidates)} Adapter/Wrapper pattern candidates.",
+            })
+        
+        # Pattern 5: Decorator Detection
+        decorator_candidates = [
+            s for s in symbol_table.keys()
+            if isinstance(s, str) and ('decor' in s.lower() or 'wrap' in s.lower())
+        ]
+        if decorator_candidates:
+            patterns_detected.append({
+                'pattern': 'Decorator',
+                'location': ', '.join(decorator_candidates[:3]),
+                'confidence': 0.75,
+                'examples': decorator_candidates[:5],
+                'description': f"Found {len(decorator_candidates)} Decorator pattern candidates.",
+            })
+        
+        return patterns_detected
+    
+    def _enhance_patterns_with_llm(self, patterns_detected: List[Dict]) -> Optional[Dict]:
+        """Enhance pattern detection with LLM insights."""
+        if not self.llm or not patterns_detected:
+            return None
+        
+        try:
+            prompt = f"""You are a software architect analyzing design patterns in a codebase.
+
+DETECTED PATTERNS: {len(patterns_detected)}
+PATTERN TYPES: {', '.join(set(p['pattern'] for p in patterns_detected))}
+
+PATTERN DETAILS:
+{json.dumps(patterns_detected[:5], indent=2)}
+
+Provide JSON response with:
+{{  
+    "architecture_insights": "Analysis of architectural choices",
+    "strengths": ["Strength 1"],
+    "concerns": ["Concern 1"],
+    "recommendations": ["Recommendation 1"],
+    "maturity": "basic|intermediate|advanced"
+}}"""
+            
+            response = self.llm.invoke(prompt)
+            json_str = response.strip()
+            if '```json' in json_str:
+                json_str = json_str.split('```json')[1].split('```')[0]
+            elif '```' in json_str:
+                json_str = json_str.split('```')[1].split('```')[0]
+            
+            llm_insight = json.loads(json_str)
+            
+            return {
+                'type': 'Design Patterns Detected',
+                'file': 'Architecture',
+                'severity': 'info',
+                'description': llm_insight.get('architecture_insights', ''),
+                'patterns': patterns_detected,
+                'metrics': {
+                    'total_patterns': len(patterns_detected),
+                    'pattern_types': list(set(p['pattern'] for p in patterns_detected)),
+                    'maturity': llm_insight.get('maturity', 'intermediate'),
+                },
+                'strengths': llm_insight.get('strengths', []),
+                'concerns': llm_insight.get('concerns', []),
+                'recommendations': llm_insight.get('recommendations', []),
+                'why_problem': "Design patterns indicate architectural structure. This is informational.",
+            }
+        except Exception:
+            return None

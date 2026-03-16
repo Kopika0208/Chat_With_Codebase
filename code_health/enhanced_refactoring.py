@@ -2,20 +2,44 @@
 Enhanced Refactoring Suggestions with Code Examples and Implementation Details.
 Provides detailed, actionable refactoring recommendations with before/after examples.
 Supports multiple languages: Python, Java, C/C++, JavaScript, TypeScript, Go, Rust.
+Uses LLM (Groq) for context-aware suggestions with fallback to hardcoded templates.
 """
 
 from typing import Dict, List, Optional
+import json
+import os
+
+# Try to import LLM from cache, fallback to None if unavailable
+try:
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+    from retrieval.cache import get_llm
+    HAS_LLM = True
+except Exception:
+    get_llm = None
+    HAS_LLM = False
 
 
 class EnhancedRefactoringAdvisor:
-    """Generates comprehensive refactoring suggestions with implementation details."""
+    """Generates comprehensive refactoring suggestions with implementation details and LLM support."""
     
-    def __init__(self, analyzer, smells: List[Dict], stats: Dict):
-        """Initialize advisor with enhanced analyzer."""
+    def __init__(self, analyzer, smells: List[Dict], stats: Dict, code_snippets: Optional[Dict] = None,
+                 use_llm: bool = True):
+        """Initialize advisor with enhanced analyzer and optional LLM support."""
         self.analyzer = analyzer
         self.smells = smells
         self.stats = stats
+        self.code_snippets = code_snippets or {}
         self.language = self._detect_language()
+        self.use_llm = use_llm and HAS_LLM
+        self.llm = None
+        
+        if self.use_llm:
+            try:
+                self.llm = get_llm()
+            except Exception:
+                self.use_llm = False
+                self.llm = None
     
     def _detect_language(self) -> str:
         """Detect the primary programming language from stats."""
@@ -33,10 +57,18 @@ class EnhancedRefactoringAdvisor:
         return max(language_count.items(), key=lambda x: x[1])[0] if language_count else 'python'
     
     def generate_enhanced_suggestions(self) -> List[Dict]:
-        """Generate detailed refactoring suggestions with examples."""
+        """Generate detailed refactoring suggestions with examples and LLM context."""
         suggestions = []
         
         for smell in self.smells:
+            # Try LLM for enhanced context-aware suggestions
+            if self.use_llm and self.llm:
+                suggestion = self._generate_llm_enhanced_suggestion(smell)
+                if suggestion:
+                    suggestions.append(suggestion)
+                    continue
+            
+            # Fallback to detailed hardcoded suggestions
             suggestion = self._create_detailed_suggestion(smell)
             if suggestion:
                 suggestions.append(suggestion)
@@ -46,11 +78,145 @@ class EnhancedRefactoringAdvisor:
         
         # Sort by impact and effort
         suggestions.sort(key=lambda x: (
-            -x['impact_score'],
-            {'low': 0, 'medium': 1, 'high': 2}.get(x['effort'], 1),
+            -x.get('impact_score', 50),
+            {'low': 0, 'medium': 1, 'high': 2}.get(x.get('effort', 'medium'), 1),
         ))
         
         return suggestions
+    
+    def _generate_llm_enhanced_suggestion(self, smell: Dict) -> Optional[Dict]:
+        """Generate enhanced suggestion using LLM."""
+        if not self.llm:
+            return None
+        
+        try:
+            file_path = smell.get('file', '')
+            code_preview = self.code_snippets.get(file_path, '')[:1500] if file_path in self.code_snippets else ''
+            metrics = smell.get('metrics', {})
+            smell_type = smell.get('type', '')
+            
+            # Build detailed prompt for enhanced suggestions
+            prompt = self._build_enhanced_llm_prompt(smell, metrics, code_preview)
+            
+            # Get LLM response
+            response = self.llm.invoke(prompt)
+            
+            # Parse response
+            suggestion = self._parse_enhanced_llm_response(response, smell)
+            return suggestion if suggestion else None
+            
+        except Exception:
+            return None
+    
+    def _build_enhanced_llm_prompt(self, smell: Dict, metrics: Dict, code_preview: str) -> str:
+        """Build detailed prompt for enhanced LLM suggestions."""
+        smell_type = smell.get('type', '')
+        file_path = smell.get('file', '')
+        
+        prompt = f"""You are a senior code architect providing comprehensive refactoring guidance.
+
+DETECTED SMELL: {smell_type}
+FILE: {file_path}
+LANGUAGE: {self.language}
+SEVERITY: {smell.get('severity', 'medium')}
+
+METRICS:
+{json.dumps(metrics, indent=2)}
+
+CODE PREVIEW (first 1500 chars):
+```
+{code_preview}
+```
+
+PROVIDE COMPREHENSIVE GUIDANCE:
+1. Why this smell occurred (root cause analysis specific to this code)
+2. Impact on the codebase (maintainability, testability, scalability)
+3. 2-3 refactoring strategies with:
+   - Specific class/method names from the code
+   - Step-by-step implementation (6-8 detailed steps)
+   - Estimated effort
+   - Benefits specific to this code
+4. Before/After code examples
+5. Risks and mitigations
+6. Testing strategy
+7. Next immediate steps
+
+Return ONLY valid JSON with no markdown formatting:
+{{
+    "smell_type": "{smell_type}",
+    "file": "{file_path}",
+    "severity": "low/medium/high",
+    "effort": "low/medium/high",
+    "priority": "low/medium/high",
+    "impact_score": 50-100,
+    "estimated_time": "description",
+    "description": "What the smell is",
+    "why_it_matters": ["reason 1", "reason 2", "reason 3"],
+    "root_cause": "Why this specific code has this smell",
+    "current_metrics": {{}},
+    "strategies": [
+        {{
+            "name": "Strategy name",
+            "description": "What it does",
+            "steps": ["1. Step", "2. Step", ...],
+            "benefits": "Specific benefits",
+            "code_example": "Before/after code"
+        }}
+    ],
+    "risks": ["risk 1", "risk 2"],
+    "testing_strategy": "How to test after refactoring",
+    "next_steps": ["immediate step 1", "step 2"]
+}}"""
+        
+        return prompt
+    
+    def _parse_enhanced_llm_response(self, response: str, smell: Dict) -> Optional[Dict]:
+        """Parse enhanced LLM response JSON."""
+        try:
+            json_str = response.strip()
+            if '```json' in json_str:
+                json_str = json_str.split('```json')[1].split('```')[0]
+            elif '```' in json_str:
+                json_str = json_str.split('```')[1].split('```')[0]
+            
+            suggestion = json.loads(json_str)
+            
+            # Validate required fields
+            required = ['smell_type', 'file', 'effort', 'priority']
+            if not all(k in suggestion for k in required):
+                return None
+            
+            # Ensure lists exist
+            for key in ['why_it_matters', 'strategies', 'risks', 'next_steps']:
+                if key not in suggestion:
+                    suggestion[key] = []
+            
+            # Set default impact_score if missing
+            if 'impact_score' not in suggestion:
+                suggestion['impact_score'] = 75
+            
+            return suggestion
+            
+        except (json.JSONDecodeError, ValueError, IndexError):
+            return None
+    
+    def load_code_snippets(self, repo_dir: str) -> None:
+        """Load code snippets from repository for LLM context."""
+        try:
+            for smell in self.smells:
+                file_path = smell.get('file', '')
+                if not file_path or file_path in self.code_snippets:
+                    continue
+                
+                full_path = os.path.join(repo_dir, file_path)
+                if os.path.isfile(full_path):
+                    try:
+                        with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
+                            self.code_snippets[file_path] = f.read()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
     
     def _create_detailed_suggestion(self, smell: Dict) -> Optional[Dict]:
         """Create detailed suggestion for a specific smell."""

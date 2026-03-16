@@ -1,13 +1,26 @@
 """
 Refactoring Suggestion Generator.
 Provides actionable refactoring guidance based on detected smells.
+Uses LLM (Groq) for context-aware suggestions with fallback to hardcoded templates.
 """
 
-from typing import Dict, List
+from typing import Dict, List, Optional
+import json
+import os
+
+# Try to import LLM from cache, fallback to None if unavailable
+try:
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+    from retrieval.cache import get_llm
+    HAS_LLM = True
+except Exception:
+    get_llm = None
+    HAS_LLM = False
 
 
 class RefactoringAdvisor:
-    """Generates refactoring suggestions."""
+    """Generates refactoring suggestions using LLM with hardcoded fallback."""
     
     # Mapping from smell types to refactoring strategies
     REFACTORING_STRATEGIES = {
@@ -48,22 +61,58 @@ class RefactoringAdvisor:
         },
     }
     
-    def __init__(self, smells: List[Dict], stats: Dict):
+    def __init__(self, smells: List[Dict], stats: Dict, code_snippets: Optional[Dict] = None, 
+                 language: Optional[str] = None, use_llm: bool = True):
         """
         Initialize refactoring advisor.
         
         Args:
             smells: List of detected code smells
             stats: Code statistics
+            code_snippets: Dict mapping file paths to code content for context
+            language: Primary programming language (auto-detected if None)
+            use_llm: Whether to use LLM for suggestions (True by default)
         """
         self.smells = smells
         self.stats = stats
+        self.code_snippets = code_snippets or {}
+        self.language = language or self._detect_language()
+        self.use_llm = use_llm and HAS_LLM
+        self.llm = None
+        
+        if self.use_llm:
+            try:
+                self.llm = get_llm()
+            except Exception:
+                self.use_llm = False
+                self.llm = None
+    
+    def _detect_language(self) -> str:
+        """Auto-detect primary programming language from stats."""
+        file_stats = self.stats.get('file_stats', {})
+        if not file_stats:
+            return 'python'
+        
+        language_count = {}
+        for file_path, stats_item in file_stats.items():
+            lang = stats_item.get('language', 'python')
+            language_count[lang] = language_count.get(lang, 0) + 1
+        
+        return max(language_count.items(), key=lambda x: x[1])[0] if language_count else 'python'
     
     def generate_suggestions(self) -> List[Dict]:
         """Generate refactoring suggestions for detected smells."""
         suggestions = []
         
         for smell in self.smells:
+            # Try LLM first if available
+            if self.use_llm and self.llm:
+                suggestion = self._generate_llm_suggestion(smell)
+                if suggestion:
+                    suggestions.append(suggestion)
+                    continue
+            
+            # Fallback to hardcoded suggestions
             suggestion = self._generate_suggestion_for_smell(smell)
             if suggestion:
                 suggestions.append(suggestion)
@@ -75,6 +124,131 @@ class RefactoringAdvisor:
         ))
         
         return suggestions
+    
+    def _generate_llm_suggestion(self, smell: Dict) -> Optional[Dict]:
+        """Generate suggestion using LLM with code context."""
+        if not self.llm:
+            return None
+        
+        try:
+            # Build context
+            file_path = smell.get('file', '')
+            code_preview = self.code_snippets.get(file_path, '')[:1000] if file_path in self.code_snippets else ''
+            
+            metrics = smell.get('metrics', {})
+            smell_type = smell.get('type', '')
+            
+            # Build prompt
+            prompt = self._build_llm_prompt(smell, metrics, code_preview)
+            
+            # Get LLM response
+            response = self.llm.invoke(prompt)
+            
+            # Parse response
+            suggestion = self._parse_llm_response(response, smell)
+            return suggestion if suggestion else None
+            
+        except Exception as e:
+            # Silently fallback to hardcoded on any LLM error
+            return None
+    
+    def _build_llm_prompt(self, smell: Dict, metrics: Dict, code_preview: str) -> str:
+        """Build prompt for LLM."""
+        smell_type = smell.get('type', '')
+        file_path = smell.get('file', '')
+        
+        prompt = f"""You are a senior software architect analyzing code smells.
+
+DETECTED SMELL: {smell_type}
+FILE: {file_path}
+LANGUAGE: {self.language}
+SEVERITY: {smell.get('severity', 'medium')}
+
+METRICS:
+{json.dumps(metrics, indent=2)}
+
+CODE PREVIEW:
+```
+{code_preview}
+```
+
+REQUIREMENTS:
+1. Analyze why this specific smell occurred in this code
+2. Suggest 2-3 refactoring strategies tailored to this context
+3. For each strategy, provide:
+   - name: Strategy name
+   - description: What it does
+   - steps: Numbered actionable steps (4-8 steps)
+   - benefit: Specific benefits for this code
+4. Include real class/method names from the code when possible
+5. Estimate effort realistically
+6. Return ONLY valid JSON, no markdown code blocks
+
+RESPONSE FORMAT:
+{{
+    "smell_type": "{smell_type}",
+    "file": "{file_path}",
+    "effort": "low/medium/high",
+    "priority": "low/medium/high",
+    "description": "Context-specific explanation",
+    "why_it_happened": "Analysis of root cause in YOUR code",
+    "strategies": [
+        {{
+            "name": "Strategy name",
+            "description": "What it does",
+            "steps": ["1. Step one", "2. Step two", ...],
+            "benefit": "Specific benefits for this file"
+        }}
+    ],
+    "affected_files": ["{file_path}"],
+    "rationale": "Why this matters specifically for this code"
+}}"""
+        
+        return prompt
+    
+    def _parse_llm_response(self, response: str, smell: Dict) -> Optional[Dict]:
+        """Parse LLM response JSON."""
+        try:
+            # Extract JSON from response (handle markdown code blocks if present)
+            json_str = response.strip()
+            if '```json' in json_str:
+                json_str = json_str.split('```json')[1].split('```')[0]
+            elif '```' in json_str:
+                json_str = json_str.split('```')[1].split('```')[0]
+            
+            suggestion = json.loads(json_str)
+            
+            # Validate required fields
+            if not all(k in suggestion for k in ['smell_type', 'file', 'effort', 'priority']):
+                return None
+            
+            # Ensure strategies exist
+            if 'strategies' not in suggestion:
+                suggestion['strategies'] = []
+            
+            return suggestion
+            
+        except (json.JSONDecodeError, ValueError, IndexError):
+            return None
+    
+    def load_code_snippets(self, repo_dir: str) -> None:
+        """Load code snippets from repository for LLM context."""
+        try:
+            for smell in self.smells:
+                file_path = smell.get('file', '')
+                if not file_path or file_path in self.code_snippets:
+                    continue
+                
+                # Try to find file in repo
+                full_path = os.path.join(repo_dir, file_path)
+                if os.path.isfile(full_path):
+                    try:
+                        with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
+                            self.code_snippets[file_path] = f.read()
+                    except Exception:
+                        pass
+        except Exception:
+            pass  # Silently fail, continue without code snippets
     
     def _generate_suggestion_for_smell(self, smell: Dict) -> Dict:
         """Generate specific suggestion for a smell."""

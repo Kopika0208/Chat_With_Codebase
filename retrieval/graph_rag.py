@@ -9,7 +9,8 @@ Implements the full Graph-RAG system:
 """
 
 import os
-from typing import List, Set, Dict, Optional
+from collections import deque
+from typing import List, Set, Dict, Optional, Tuple
 from dataclasses import dataclass
 from langchain_core.documents import Document
 
@@ -217,6 +218,161 @@ class GraphRAGRetriever:
     def _doc_id(doc: Document) -> str:
         meta = doc.metadata or {}
         return f"{meta.get('path','')}:{meta.get('start_line',0)}"
+
+    def trace_request_path(
+        self,
+        entry_symbol: str,
+        target_symbol: Optional[str] = None,
+        max_depth: int = 8,
+    ) -> Dict[str, object]:
+        """Trace a likely request/dataflow path from entry code toward downstream logic."""
+        entry_node = self._resolve_symbol_node(entry_symbol)
+        target_node = self._resolve_symbol_node(target_symbol) if target_symbol else None
+
+        if not entry_node:
+            return {
+                "entry_node": None,
+                "target_node": target_node,
+                "path": [],
+                "documents": [],
+                "summary": f"Could not resolve entry symbol '{entry_symbol}' in the knowledge graph.",
+            }
+
+        path_edges = self._find_preferred_path(entry_node, target_node, max_depth=max_depth)
+        path_nodes = [entry_node]
+        for source_id, target_id, edge_type, props in path_edges:
+            if not path_nodes or path_nodes[-1] != source_id:
+                path_nodes.append(source_id)
+            if path_nodes[-1] != target_id:
+                path_nodes.append(target_id)
+
+        documents = self._retrieve_documents_for_nodes(set(path_nodes))
+        steps = []
+        for idx, node_id in enumerate(path_nodes):
+            node = self.graph.nodes.get(node_id, {})
+            inbound = None
+            if idx > 0 and idx - 1 < len(path_edges):
+                inbound = path_edges[idx - 1]
+            steps.append({
+                "node_id": node_id,
+                "name": node.get("name", node_id),
+                "type": node.get("type", "unknown"),
+                "file": node.get("file", ""),
+                "line": node.get("line", 0),
+                "incoming_edge_type": inbound[2] if inbound else None,
+                "incoming_edge_properties": inbound[3] if inbound else {},
+            })
+
+        return {
+            "entry_node": entry_node,
+            "target_node": target_node,
+            "path": steps,
+            "documents": documents,
+            "summary": (
+                f"Traced {len(steps)} step(s) from {entry_symbol}"
+                + (f" toward {target_symbol}." if target_symbol else ".")
+            ),
+        }
+
+    def _resolve_symbol_node(self, symbol: Optional[str]) -> Optional[str]:
+        """Resolve a user-facing symbol or FQN to a knowledge-graph node id."""
+        if not symbol:
+            return None
+        if symbol in self.graph.nodes:
+            return symbol
+
+        normalized = symbol.lower()
+        exact_matches = []
+        suffix_matches = []
+        name_matches = []
+        for node_id, node in self.graph.nodes.items():
+            node_name = str(node.get("name", "")).lower()
+            if node_id.lower() == normalized:
+                exact_matches.append(node_id)
+            elif node_id.lower().endswith(f":{normalized}"):
+                suffix_matches.append(node_id)
+            elif node_name == normalized:
+                name_matches.append(node_id)
+
+        for matches in (exact_matches, suffix_matches, name_matches):
+            if matches:
+                return matches[0]
+        return None
+
+    def _find_preferred_path(
+        self,
+        entry_node: str,
+        target_node: Optional[str],
+        max_depth: int = 8,
+    ) -> List[Tuple[str, str, str, Dict]]:
+        """Find a forward path preferring dataflow edges, then calls, then containment."""
+        preferred_edges = ["dataflow", "calls", "contains"]
+        queue = deque([(entry_node, [], 0)])
+        visited = {entry_node}
+
+        best_path = []
+        best_score = -1
+
+        while queue:
+            current, path, depth = queue.popleft()
+            if depth >= max_depth:
+                continue
+
+            if target_node and current == target_node:
+                return path
+
+            neighbors = self.graph.adjacency_out.get(current, [])
+            ranked_neighbors = sorted(
+                neighbors,
+                key=lambda item: (
+                    preferred_edges.index(item[1]) if item[1] in preferred_edges else len(preferred_edges),
+                    0 if self._looks_like_downstream_target(item[0]) else 1,
+                )
+            )
+
+            for neighbor_id, edge_type, props in ranked_neighbors:
+                if neighbor_id in visited:
+                    continue
+                next_path = path + [(current, neighbor_id, edge_type, props)]
+                score = self._path_score(next_path)
+                if not target_node and score > best_score:
+                    best_score = score
+                    best_path = next_path
+                visited.add(neighbor_id)
+                queue.append((neighbor_id, next_path, depth + 1))
+
+        return best_path
+
+    def _path_score(self, path: List[Tuple[str, str, str, Dict]]) -> int:
+        """Score a path based on dataflow richness and downstream-looking nodes."""
+        score = 0
+        for _, target_id, edge_type, props in path:
+            if edge_type == "dataflow":
+                score += 3
+                if props.get("flow_kind") == "interprocedural_call":
+                    score += 2
+                if props.get("flow_kind") == "return_propagation":
+                    score += 1
+            elif edge_type == "calls":
+                score += 2
+            elif edge_type == "contains":
+                score += 1
+
+            if self._looks_like_downstream_target(target_id):
+                score += 2
+        return score
+
+    def _looks_like_downstream_target(self, node_id: str) -> bool:
+        """Heuristic for service/repository/data-access style endpoints."""
+        node = self.graph.nodes.get(node_id, {})
+        text = " ".join(
+            [
+                str(node_id).lower(),
+                str(node.get("name", "")).lower(),
+                str(node.get("file", "")).lower(),
+            ]
+        )
+        return any(token in text for token in ("repo", "repository", "dao", "db", "database", "model", "query", "save", "fetch", "store"))
 
 
 # ======================================================

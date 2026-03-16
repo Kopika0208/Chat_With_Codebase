@@ -77,6 +77,8 @@ class DataFlowAnalyzer(ast.NodeVisitor):
         self.type_state: Dict[str, Optional[str]] = {}
         self.constant_values: Dict[str, Optional[Any]] = {}
         self.type_by_line: Dict[int, Dict[str, str]] = defaultdict(dict)
+        self.call_sites: List[Dict[str, Any]] = []
+        self.return_values: List[Dict[str, Any]] = []
         
         # Extract parameters as initial definitions
         self._extract_parameters()
@@ -112,6 +114,12 @@ class DataFlowAnalyzer(ast.NodeVisitor):
         for target in node.targets:
             self._process_assignment_target(target, node.value, node.lineno)
         self.generic_visit(node)
+        if isinstance(node.value, ast.Call) and self.call_sites:
+            latest_call = self.call_sites[-1]
+            if latest_call.get("line") == node.lineno:
+                assigned_names = [target.id for target in node.targets if isinstance(target, ast.Name)]
+                if assigned_names:
+                    latest_call["assigned_to"] = assigned_names[0]
     
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
         """Track annotated assignments."""
@@ -176,15 +184,17 @@ class DataFlowAnalyzer(ast.NodeVisitor):
     
     def visit_Call(self, node: ast.Call) -> None:
         """Track function calls and their arguments."""
-        if isinstance(node.func, ast.Name):
+        callee_name = self._get_callee_name(node.func)
+        if callee_name:
             use = Use(
-                name=node.func.id,
+                name=callee_name,
                 line_number=node.lineno,
                 context="call"
             )
-            self.uses[node.func.id].append(use)
-        
+            self.uses[callee_name].append(use)
+
         # Track arguments as uses
+        arg_bindings = []
         for arg in node.args:
             if isinstance(arg, ast.Name):
                 use = Use(
@@ -194,7 +204,35 @@ class DataFlowAnalyzer(ast.NodeVisitor):
                     inferred_type=self.type_state.get(arg.id)
                 )
                 self.uses[arg.id].append(use)
-        
+                arg_bindings.append({
+                    "name": arg.id,
+                    "expr": arg.id,
+                    "type": self.type_state.get(arg.id),
+                    "kind": "name",
+                })
+            else:
+                arg_bindings.append({
+                    "name": None,
+                    "expr": ast.unparse(arg) if hasattr(ast, "unparse") else ast.dump(arg),
+                    "type": self._infer_type_from_value(arg),
+                    "kind": type(arg).__name__,
+                })
+
+        keyword_bindings = []
+        for keyword in node.keywords:
+            keyword_bindings.append({
+                "name": keyword.arg,
+                "expr": ast.unparse(keyword.value) if hasattr(ast, "unparse") else ast.dump(keyword.value),
+                "type": self._infer_type_from_value(keyword.value),
+            })
+
+        self.call_sites.append({
+            "callee": callee_name,
+            "line": node.lineno,
+            "args": arg_bindings,
+            "keywords": keyword_bindings,
+        })
+
         self.generic_visit(node)
     
     def visit_Return(self, node: ast.Return) -> None:
@@ -207,6 +245,16 @@ class DataFlowAnalyzer(ast.NodeVisitor):
                 inferred_type=self.type_state.get(node.value.id)
             )
             self.uses[node.value.id].append(use)
+
+        if node.value:
+            return_expr = ast.unparse(node.value) if hasattr(ast, "unparse") else ast.dump(node.value)
+            return_source = node.value.id if isinstance(node.value, ast.Name) else None
+            self.return_values.append({
+                "line": node.lineno,
+                "expr": return_expr,
+                "source": return_source,
+                "type": self._infer_type_from_value(node.value),
+            })
         
         self.generic_visit(node)
     
@@ -228,11 +276,19 @@ class DataFlowAnalyzer(ast.NodeVisitor):
             self.type_state[var_name] = inferred_type
             self.constant_values[var_name] = constant_val
             self.type_by_line[lineno][var_name] = inferred_type
-        
+
         elif isinstance(target, (ast.Tuple, ast.List)):
             # Handle unpacking
             for elt in target.elts:
                 self._process_assignment_target(elt, value, lineno)
+
+    def _get_callee_name(self, func_node: ast.expr) -> Optional[str]:
+        """Extract a simple callee name from a call expression."""
+        if isinstance(func_node, ast.Name):
+            return func_node.id
+        if isinstance(func_node, ast.Attribute):
+            return func_node.attr
+        return None
     
     def _infer_type_from_value(self, value: ast.expr) -> Optional[str]:
         """Infer type from value expression."""
@@ -309,6 +365,14 @@ class DataFlowAnalyzer(ast.NodeVisitor):
         
         return {
             "function_name": self.function_name,
+            "parameters": [
+                {
+                    "name": arg.arg,
+                    "type": ast.unparse(arg.annotation) if arg.annotation and hasattr(ast, "unparse") else None,
+                    "line": self.function_node.lineno,
+                }
+                for arg in self.function_node.args.args
+            ],
             "definitions": {
                 var: [
                     {
@@ -347,6 +411,8 @@ class DataFlowAnalyzer(ast.NodeVisitor):
                 }
                 for chain_id, chain in self.def_use_chains.items()
             },
+            "call_sites": self.call_sites,
+            "returns": self.return_values,
             "type_at_line": dict(self.type_by_line),
             "constants": {var: val for var, val in self.constant_values.items() if val is not None},
             "control_flow": {

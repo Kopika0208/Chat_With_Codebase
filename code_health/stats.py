@@ -11,11 +11,21 @@ from collections import defaultdict
 import subprocess
 from pathlib import Path
 
+# Try to import LLM from cache, fallback to None if unavailable
+try:
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+    from retrieval.cache import get_llm
+    HAS_LLM = True
+except Exception:
+    get_llm = None
+    HAS_LLM = False
+
 
 class CodeStatistics:
     """Computes comprehensive code statistics."""
     
-    def __init__(self, repo_path: str, call_graph: Dict, symbol_table: Dict):
+    def __init__(self, repo_path: str, call_graph: Dict, symbol_table: Dict, use_llm: bool = True):
         """
         Initialize statistics computer.
         
@@ -23,6 +33,7 @@ class CodeStatistics:
             repo_path: Path to repository source files
             call_graph: Call graph data structure
             symbol_table: Symbol table with function/class metadata
+            use_llm: Whether to use LLM for enhanced analysis
         """
         self.repo_path = repo_path
         # Ensure call_graph is always a dict
@@ -32,6 +43,15 @@ class CodeStatistics:
         self.file_stats = {}
         self.module_stats = {}
         self.repo_stats = {}
+        self.use_llm = use_llm and HAS_LLM
+        self.llm = None
+        
+        if self.use_llm:
+            try:
+                self.llm = get_llm()
+            except Exception:
+                self.use_llm = False
+                self.llm = None
     
     def compute_all_statistics(self) -> Dict:
         """Compute all code statistics."""
@@ -560,3 +580,125 @@ class CodeStatistics:
                 })
         
         return sorted(poorly_documented, key=lambda x: x['docstring_coverage'])
+    
+    def analyze_naming_conventions(self) -> Dict:
+        """Analyze naming convention compliance (language-aware, LLM-enhanced)."""
+        violations = self._detect_naming_violations()
+        
+        # Try LLM enhancement if available
+        if self.use_llm and self.llm and violations:
+            enhanced = self._enhance_naming_analysis_with_llm(violations)
+            if enhanced:
+                return enhanced
+        
+        # Return basic analysis with fallback
+        return self._format_naming_analysis(violations)
+    
+    def _detect_naming_violations(self) -> List[Dict]:
+        """Detect raw naming convention violations."""
+        violations = []
+        
+        naming_rules = {
+            'python': {
+                'function': r'^[a-z_][a-z0-9_]*$',
+                'class': r'^[A-Z][a-zA-Z0-9]*$',
+            },
+            'java': {
+                'function': r'^[a-z][a-zA-Z0-9]*$',
+                'class': r'^[A-Z][a-zA-Z0-9]*$',
+            },
+        }
+        
+        language_symbols = defaultdict(lambda: {'functions': [], 'classes': []})
+        
+        for symbol_name, symbol_data in self.symbol_table.items():
+            if isinstance(symbol_data, dict):
+                language = symbol_data.get('language', 'python')
+                kind = symbol_data.get('kind', 'variable')
+                if kind in ('function', 'method'):
+                    language_symbols[language]['functions'].append(symbol_name)
+                elif kind == 'class':
+                    language_symbols[language]['classes'].append(symbol_name)
+        
+        for language, symbols in language_symbols.items():
+            rules = naming_rules.get(language, naming_rules.get('python'))
+            
+            for func_name in symbols['functions']:
+                if func_name.startswith('_'):
+                    continue
+                if not re.match(rules['function'], func_name):
+                    violations.append({
+                        'symbol': func_name,
+                        'language': language,
+                        'kind': 'function',
+                        'expected': 'snake_case' if language == 'python' else 'camelCase',
+                        'actual': 'camelCase' if any(c.isupper() for c in func_name[1:]) else 'snake_case',
+                    })
+            
+            for class_name in symbols['classes']:
+                if not re.match(rules['class'], class_name):
+                    violations.append({
+                        'symbol': class_name,
+                        'language': language,
+                        'kind': 'class',
+                        'expected': 'PascalCase',
+                        'actual': 'other',
+                    })
+        
+        return violations
+    
+    def _enhance_naming_analysis_with_llm(self, violations: List[Dict]) -> Optional[Dict]:
+        """Enhance naming analysis with LLM."""
+        if not self.llm or not violations:
+            return None
+        
+        try:
+            prompt = f"""Analyze naming convention violations in code:
+
+VIOLATIONS (first 10 of {len(violations)}):
+{json.dumps(violations[:10], indent=2)}
+
+Provide JSON response:
+{{
+    "summary": "Brief explanation of issues",
+    "impact": "Developer experience impact",
+    "priority_fixes": ["Symbol1: suggestion"],
+    "effort": "low/medium/high",
+    "automation_possible": true
+}}"""
+            
+            response = self.llm.invoke(prompt)
+            json_str = response.strip()
+            if '```json' in json_str:
+                json_str = json_str.split('```json')[1].split('```')[0]
+            elif '```' in json_str:
+                json_str = json_str.split('```')[1].split('```')[0]
+            
+            llm_insight = json.loads(json_str)
+            return self._format_naming_analysis(violations, llm_insight)
+        except Exception:
+            return None
+    
+    def _format_naming_analysis(self, violations: List[Dict], llm_insight: Optional[Dict] = None) -> Dict:
+        """Format naming analysis result."""
+        result = {
+            'convention_violations': violations,
+            'violation_count': len(violations),
+            'coverage': f"{(1 - len(violations) / max(len(self.symbol_table), 1)) * 100:.1f}%",
+            'by_language': defaultdict(int),
+        }
+        
+        for v in violations:
+            result['by_language'][v['language']] = result['by_language'].get(v['language'], 0) + 1
+        
+        result['by_language'] = dict(result['by_language'])
+        
+        if llm_insight:
+            result['llm_analysis'] = {
+                'summary': llm_insight.get('summary', ''),
+                'impact': llm_insight.get('impact', ''),
+                'priority_fixes': llm_insight.get('priority_fixes', []),
+                'effort': llm_insight.get('effort', 'medium'),
+            }
+        
+        return result

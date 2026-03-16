@@ -24,6 +24,10 @@ class QueryIntentType(Enum):
     FIND_CALLER = "find_caller"
     FIND_RELATED = "find_related"
     UNDERSTAND_FLOW = "understand_flow"
+    UNDERSTAND_STARTUP = "understand_startup"
+    UNDERSTAND_BUSINESS_LOGIC = "understand_business_logic"
+    UNDERSTAND_DATA_STRUCTURES = "understand_data_structures"
+    UNDERSTAND_ASYNC = "understand_async"
     FIND_SIMILAR = "find_similar"
     CUSTOM = "custom"
 
@@ -124,6 +128,39 @@ class StructureAwareAnalyzer:
             r'(?:explain|understand|trace)\s+(?:the\s+)?(?:flow|execution|logic)\s+(?:of|in)\s+(\w+)',
             r'(?:flow|execution|logic)\s+(?:of|in)\s+(\w+)',
             r'how\s+(?:does|do)\s+(\w+)\s+work',
+            r'how\s+does\s+data\s+flow',
+            r'(?:trace|explain|show)\s+(?:the\s+)?data\s+flow',
+            r'user\s+request.*(?:flow|through)',
+        ],
+        QueryIntentType.UNDERSTAND_STARTUP: [
+            r'entry\s+point',
+            r'startup',
+            r'boot\s+(?:sequence|flow|process)',
+            r'how\s+does\s+(?:the\s+)?(?:app|application|service|program|system)\s+start',
+            r'how\s+does\s+it\s+start',
+            r'what\s+is\s+the\s+sequence\s+of\s+events.*ready',
+        ],
+        QueryIntentType.UNDERSTAND_BUSINESS_LOGIC: [
+            r'heavy\s+lifting',
+            r'core\s+logic',
+            r'primary\s+business\s+logic',
+            r'where\s+does\s+the\s+main\s+logic\s+happen',
+            r'which\s+parts?\s+do(?:es)?\s+the\s+most\s+work',
+        ],
+        QueryIntentType.UNDERSTAND_DATA_STRUCTURES: [
+            r'core\s+data\s+structures?',
+            r'how\s+is\s+data\s+stored',
+            r'where\s+is\s+state\s+stored',
+            r'data\s+structure',
+            r'state\s+owners?',
+        ],
+        QueryIntentType.UNDERSTAND_ASYNC: [
+            r'async',
+            r'asynchronous',
+            r'background\s+(?:job|jobs|task|tasks|worker|workers)',
+            r'threading',
+            r'concurrency',
+            r'parallel\s+execution',
         ],
         QueryIntentType.FIND_SIMILAR: [
             r'find\s+(?:similar|related|equivalent)\s+(?:code|function|implementation)',
@@ -211,7 +248,8 @@ class StructureAwareAnalyzer:
             'find', 'search', 'locate', 'identify', 'show', 'display',
             'function', 'class', 'method', 'implementation', 'usage', 'caller',
             'pattern', 'similar', 'related', 'equivalent', 'flow', 'execution',
-            'trace', 'understand', 'explain', 'code', 'logic'
+            'trace', 'understand', 'explain', 'code', 'logic', 'entry', 'startup', 'boot', 'ready',
+            'business', 'state', 'data', 'structure', 'async', 'background', 'thread'
         }
         
         words = re.findall(r'\b\w+\b', query.lower())
@@ -252,6 +290,22 @@ class StructureAwareAnalyzer:
 
 class SymbolAwareParser:
     """Identifies and parses symbols in queries."""
+
+    @staticmethod
+    def _normalize_kg_nodes(kg: Dict) -> Dict[str, Dict[str, Any]]:
+        """Accept KG nodes as either a dict keyed by node id or a list of node dicts."""
+        raw_nodes = kg.get('nodes', {}) if isinstance(kg, dict) else {}
+        if isinstance(raw_nodes, dict):
+            return raw_nodes
+        if isinstance(raw_nodes, list):
+            normalized = {}
+            for node in raw_nodes:
+                if isinstance(node, dict):
+                    node_id = node.get('id') or node.get('node_id') or node.get('name')
+                    if node_id:
+                        normalized[node_id] = node
+            return normalized
+        return {}
     
     @staticmethod
     def extract_symbols(query: str, knowledge_graph: Optional[Dict] = None) -> Tuple[List[Symbol], List[Symbol]]:
@@ -367,7 +421,7 @@ class SymbolAwareParser:
     def _validate_with_kg(symbols: List[Symbol], kg: Dict) -> List[Symbol]:
         """Validate and enrich symbols using knowledge graph."""
         validated = []
-        kg_nodes = kg.get('nodes', {})
+        kg_nodes = SymbolAwareParser._normalize_kg_nodes(kg)
         
         for symbol in symbols:
             # Check if symbol exists in KG
@@ -386,6 +440,32 @@ class SymbolAwareParser:
 
 class KGAwareExpander:
     """Expands queries using knowledge graph relationships."""
+
+    @staticmethod
+    def _normalize_kg_nodes(kg: Dict) -> Dict[str, Dict[str, Any]]:
+        """Accept KG nodes as either a dict keyed by node id or a list of node dicts."""
+        raw_nodes = kg.get('nodes', {}) if isinstance(kg, dict) else {}
+        if isinstance(raw_nodes, dict):
+            return raw_nodes
+        if isinstance(raw_nodes, list):
+            normalized = {}
+            for node in raw_nodes:
+                if isinstance(node, dict):
+                    node_id = node.get('id') or node.get('node_id') or node.get('name')
+                    if node_id:
+                        normalized[node_id] = node
+            return normalized
+        return {}
+
+    @staticmethod
+    def _normalize_kg_edges(kg: Dict) -> List[Dict[str, Any]]:
+        """Accept KG edges as either a list of edge dicts or a dict-like structure."""
+        raw_edges = kg.get('edges', []) if isinstance(kg, dict) else []
+        if isinstance(raw_edges, list):
+            return [edge for edge in raw_edges if isinstance(edge, dict)]
+        if isinstance(raw_edges, dict):
+            return [edge for edge in raw_edges.values() if isinstance(edge, dict)]
+        return []
     
     @staticmethod
     def expand_query(structure: QueryStructure, kg: Dict) -> Dict[str, Any]:
@@ -404,8 +484,8 @@ class KGAwareExpander:
             "inheritance_chain": {},
         }
         
-        kg_nodes = kg.get('nodes', {})
-        kg_edges = kg.get('edges', [])
+        kg_nodes = KGAwareExpander._normalize_kg_nodes(kg)
+        kg_edges = KGAwareExpander._normalize_kg_edges(kg)
         
         # For each symbol in query, find related nodes in KG
         for symbol in structure.get_all_symbols():
@@ -600,6 +680,7 @@ class QueryUnderstanding:
             "kg_expansion": kg_expansion,
             "summary": summary,
             "intent": structure.intent.value,
+            "is_startup_query": structure.intent == QueryIntentType.UNDERSTAND_STARTUP,
             "has_code": structure.has_code_snippet(),
             "constraints": structure.constraints,
         }
@@ -618,6 +699,10 @@ class QueryUnderstanding:
             QueryIntentType.FIND_IMPLEMENTATION: "Find the implementation",
             QueryIntentType.FIND_PATTERN: "Find a code pattern",
             QueryIntentType.UNDERSTAND_FLOW: "Understand the execution flow",
+            QueryIntentType.UNDERSTAND_STARTUP: "Understand the startup lifecycle",
+            QueryIntentType.UNDERSTAND_BUSINESS_LOGIC: "Understand the primary business logic",
+            QueryIntentType.UNDERSTAND_DATA_STRUCTURES: "Understand the core data structures",
+            QueryIntentType.UNDERSTAND_ASYNC: "Understand asynchronous execution patterns",
             QueryIntentType.FIND_SIMILAR: "Find similar code",
             QueryIntentType.CUSTOM: "Answer a custom question",
         }

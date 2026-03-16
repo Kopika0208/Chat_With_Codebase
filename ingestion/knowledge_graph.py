@@ -161,6 +161,43 @@ class KnowledgeGraph:
             "nodes": [node.to_dict() for node in self.nodes.values()],
             "edges": [edge.to_dict() for edge in self.edges],
         }
+
+    def compute_node_importance(self, top_k: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Rank nodes by a simple centrality-style score using graph connectivity."""
+        ranked = []
+
+        for node_id, node in self.nodes.items():
+            outgoing = self.adjacency_out.get(node_id, [])
+            incoming = self.adjacency_in.get(node_id, [])
+            edge_types = {edge.edge_type for edge in outgoing + incoming}
+
+            score = (
+                len(outgoing) * 1.2
+                + len(incoming) * 1.0
+                + len(edge_types) * 1.5
+            )
+
+            ranked.append({
+                "id": node_id,
+                "name": node.name,
+                "type": node.node_type,
+                "file": node.file_path,
+                "line": node.line_number,
+                "out_degree": len(outgoing),
+                "in_degree": len(incoming),
+                "edge_types": sorted(edge_types),
+                "importance_score": round(score, 3),
+            })
+
+        ranked.sort(
+            key=lambda item: (
+                -item["importance_score"],
+                -item["out_degree"],
+                -item["in_degree"],
+                item["name"],
+            )
+        )
+        return ranked[:top_k] if top_k else ranked
     
     def to_json(self, path: str) -> None:
         """Persist graph to JSON file."""
@@ -249,7 +286,11 @@ class KnowledgeGraphBuilder:
         
         print(f"✅ Built graph with {len(self.graph.nodes)} nodes")
     
-    def build_from_dataflow(self, dataflow_by_file: Dict[str, Dict[str, Any]]) -> None:
+    def build_from_dataflow(
+        self,
+        dataflow_by_file: Dict[str, Dict[str, Any]],
+        call_graph: Optional[Dict[str, List[str]]] = None,
+    ) -> None:
         """Add dataflow relationships to the graph."""
         print("📊 Adding dataflow edges to knowledge graph...")
         
@@ -276,7 +317,106 @@ class KnowledgeGraphBuilder:
                             }
                         )
                         self.graph.add_edge(edge)
+
+        if call_graph:
+            self._add_interprocedural_dataflow(dataflow_by_file, call_graph)
     
+    def _add_interprocedural_dataflow(
+        self,
+        dataflow_by_file: Dict[str, Dict[str, Any]],
+        call_graph: Dict[str, List[str]],
+    ) -> None:
+        """Connect caller and callee functions with cross-boundary dataflow edges."""
+        print("Adding inter-procedural dataflow edges...")
+
+        function_analysis = {}
+        for file_path, functions in dataflow_by_file.items():
+            for func_name, analysis in functions.items():
+                function_analysis[f"{file_path}:{func_name}"] = analysis
+
+        edges_added = 0
+        for caller_fqn, callees in call_graph.items():
+            caller_analysis = function_analysis.get(caller_fqn)
+            if not caller_analysis:
+                continue
+
+            for callee_fqn in callees:
+                callee_analysis = function_analysis.get(callee_fqn)
+                if not callee_analysis:
+                    continue
+
+                call_site = self._match_call_site(caller_analysis, callee_fqn)
+                if not call_site:
+                    continue
+
+                self.graph.add_edge(
+                    KnowledgeGraphEdge(
+                        source_id=caller_fqn,
+                        target_id=callee_fqn,
+                        edge_type="dataflow",
+                        properties={
+                            "flow_kind": "interprocedural_call",
+                            "call_line": call_site.get("line", 0),
+                            "parameter_bindings": self._build_parameter_bindings(call_site, callee_analysis),
+                            "assigned_to": call_site.get("assigned_to"),
+                        }
+                    )
+                )
+                edges_added += 1
+
+                if call_site.get("assigned_to") and callee_analysis.get("returns"):
+                    self.graph.add_edge(
+                        KnowledgeGraphEdge(
+                            source_id=callee_fqn,
+                            target_id=caller_fqn,
+                            edge_type="dataflow",
+                            properties={
+                                "flow_kind": "return_propagation",
+                                "call_line": call_site.get("line", 0),
+                                "assigned_to": call_site.get("assigned_to"),
+                                "returns": callee_analysis.get("returns", []),
+                            }
+                        )
+                    )
+                    edges_added += 1
+
+        print(f"Added {edges_added} inter-procedural dataflow edges")
+
+    def _match_call_site(self, caller_analysis: Dict[str, Any], callee_fqn: str) -> Optional[Dict[str, Any]]:
+        """Find the likely call site for a callee inside a caller function."""
+        callee_short_name = callee_fqn.split(":")[-1]
+        for site in caller_analysis.get("call_sites", []):
+            if site.get("callee") == callee_short_name:
+                return site
+        return None
+
+    def _build_parameter_bindings(self, call_site: Dict[str, Any], callee_analysis: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Zip positional and keyword caller arguments to callee parameters."""
+        bindings = []
+        parameters = callee_analysis.get("parameters", [])
+        args = call_site.get("args", [])
+
+        for index, parameter in enumerate(parameters):
+            if index < len(args):
+                arg = args[index]
+                bindings.append({
+                    "parameter": parameter.get("name"),
+                    "argument_expr": arg.get("expr"),
+                    "argument_name": arg.get("name"),
+                    "argument_type": arg.get("type"),
+                })
+
+        for keyword in call_site.get("keywords", []):
+            if keyword.get("name"):
+                bindings.append({
+                    "parameter": keyword.get("name"),
+                    "argument_expr": keyword.get("expr"),
+                    "argument_name": keyword.get("name"),
+                    "argument_type": keyword.get("type"),
+                })
+
+        return bindings
+
     def add_call_graph(self, call_graph: Dict[str, List[str]]) -> None:
         """Add call graph as edges to the knowledge graph."""
         print("📞 Adding call graph edges to knowledge graph...")
