@@ -4,6 +4,7 @@ import gc
 import json
 import os
 import time
+from datetime import datetime
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import Any, Dict, List, Optional
 
@@ -67,6 +68,11 @@ except ImportError:
     FAISS = None
 
 try:
+    from langchain_groq import ChatGroq
+except ImportError:
+    ChatGroq = None
+
+try:
     from .zip_ingestion import download_and_extract_repo
 except ImportError:
     download_and_extract_repo = None
@@ -82,6 +88,11 @@ except ImportError:
     save_ingestion_metrics = None
     save_contribution_metrics = None
     save_graph_metrics = None
+
+try:
+    from backend.health_analysis import compute_health_payload
+except ImportError:
+    compute_health_payload = None
 
 # ===============================
 # CRITICAL: Define constants FIRST before any other imports
@@ -129,6 +140,25 @@ CONTRIBUTION_INCLUDE_DETAILS = _env_bool("INGEST_CONTRIBUTION_INCLUDE_DETAILS", 
 MAX_API_FILES = _env_int("MAX_API_FILES", 1500)
 MAX_API_SIZE_MB = _env_int("MAX_API_SIZE_MB", 50)
 MAX_API_ESTIMATED_CALLS = _env_int("MAX_API_ESTIMATED_CALLS", 2000)
+
+
+def _disable_langsmith_tracing():
+    """Disable LangSmith tracing for ingestion runs to avoid quota errors."""
+    os.environ["LANGCHAIN_TRACING_V2"] = "false"
+    os.environ["LANGCHAIN_TRACING"] = "false"
+    os.environ["LANGSMITH_TRACING"] = "false"
+    for key in (
+        "LANGCHAIN_API_KEY",
+        "LANGCHAIN_ENDPOINT",
+        "LANGCHAIN_LLM_ENDPOINT",
+        "LANGCHAIN_LIVE_CHAT_API_KEY",
+        "LANGSMITH_API_KEY",
+        "LANGSMITH_ENDPOINT",
+    ):
+        os.environ.pop(key, None)
+
+
+_disable_langsmith_tracing()
 
 
 def _get_repo_paths(repo_name: str = None):
@@ -489,6 +519,173 @@ def _format_duration(seconds: float) -> str:
         return f"{seconds / 60:.2f}m"
     else:
         return f"{seconds / 3600:.2f}h"
+
+
+def _make_json_safe(value):
+    """Recursively convert sets/tuples into JSON-safe containers."""
+    if isinstance(value, dict):
+        return {k: _make_json_safe(v) for k, v in value.items()}
+    if isinstance(value, set):
+        return [_make_json_safe(v) for v in sorted(value, key=lambda item: str(item))]
+    if isinstance(value, tuple):
+        return [_make_json_safe(v) for v in value]
+    if isinstance(value, list):
+        return [_make_json_safe(v) for v in value]
+    return value
+
+
+def _generate_repository_documentation(
+    repo_name: str,
+    repo_path: str,
+    symbol_resolver,
+    call_graph: Dict[str, Any],
+    boot_chain: Dict[str, Any],
+    core_structures: Dict[str, Any],
+    kg_builder,
+) -> Dict[str, Any]:
+    """Create a detailed narrative doc for onboarding (pre-generated in ingestion)."""
+    total_files = len(symbol_resolver.symbol_tables)
+    function_count = 0
+    method_count = 0
+    class_count = 0
+
+    file_symbol_sizes = []
+    for file_path, st in symbol_resolver.symbol_tables.items():
+        function_count += len(st.get_symbols_by_kind("function"))
+        method_count += len(st.get_symbols_by_kind("method"))
+        class_count += len(st.get_symbols_by_kind("class"))
+        file_symbol_sizes.append((file_path, len(st.all_symbols)))
+
+    total_functions = function_count + method_count
+    top_files = sorted(file_symbol_sizes, key=lambda x: -x[1])[:10]
+
+    languages = set()
+    for file_path in symbol_resolver.symbol_tables.keys():
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext:
+            languages.add(ext)
+
+    entry_names = []
+    if boot_chain and boot_chain.get("entry_points"):
+        entry_names = [x.get("name", "?") for x in boot_chain.get("entry_points", [])][:8]
+
+    core_summary = []
+    if core_structures and core_structures.get("structures"):
+        core_summary = [s.get("name") for s in core_structures.get("structures", [])[:8]]
+
+    total_nodes = len(kg_builder.graph.nodes) if kg_builder and hasattr(kg_builder, "graph") else 0
+    total_edges = len(kg_builder.graph.edges) if kg_builder and hasattr(kg_builder, "graph") else 0
+
+    top_callers = sorted(
+        [(caller, len(callees)) for caller, callees in call_graph.items()],
+        key=lambda x: -x[1]
+    )[:8]
+
+    def _strip_repo_prefix(path: str) -> str:
+        prefix = f"{repo_name}:"
+        return path[len(prefix):] if path.startswith(prefix) else path
+
+    def _read_file_excerpt(path: str, max_chars: int = 1800) -> str:
+        rel_path = _strip_repo_prefix(path)
+        abs_path = os.path.join(repo_path, rel_path)
+        if not os.path.isfile(abs_path):
+            return ""
+        try:
+            with open(abs_path, "r", encoding="utf-8", errors="ignore") as handle:
+                return handle.read(max_chars).strip()
+        except Exception:
+            return ""
+
+    def _fallback_summary() -> str:
+        language_list = ", ".join(sorted(languages)) if languages else "unknown"
+        top_files_text = ", ".join(_strip_repo_prefix(path) for path, _ in top_files[:5]) or "none identified"
+        top_callers_text = ", ".join(
+            f"{caller.split(':')[-1]} ({count} calls)"
+            for caller, count in top_callers[:5]
+        ) or "none identified"
+
+        sections = [
+            f"# {repo_name} Codebase Overview",
+            (
+                f"{repo_name} contains {total_files} indexed source files, {total_functions} functions/methods, "
+                f"and {class_count} classes across {language_list}. "
+                f"The ingestion snapshot found {len(call_graph)} call-graph nodes and {total_nodes} knowledge-graph nodes."
+            ),
+            (
+                "Start your exploration with these likely entry points: "
+                + (", ".join(entry_names) if entry_names else "no clear startup entry points were detected.")
+            ),
+            (
+                "Core structures surfaced during analysis: "
+                + (", ".join(core_summary) if core_summary else "no dominant shared structures were identified yet.")
+            ),
+            f"Files worth reading first: {top_files_text}.",
+            f"Most connected callers in the snapshot: {top_callers_text}.",
+            (
+                "This summary was generated from the ingested repository artifacts and is saved to "
+                f"`data/{repo_name}/documentation.json` for the onboarding overview."
+            ),
+        ]
+        return "\n\n".join(sections)
+
+    repo_file_samples = []
+    for file_path, symbol_count in top_files[:6]:
+        rel_path = _strip_repo_prefix(file_path)
+        excerpt = _read_file_excerpt(file_path)
+        if excerpt:
+            repo_file_samples.append(
+                {
+                    "path": rel_path,
+                    "symbol_count": symbol_count,
+                    "excerpt": excerpt,
+                }
+            )
+
+    llm_content = None
+    if ChatGroq and repo_file_samples:
+        try:
+            llm = ChatGroq(model="llama-3.1-8b-instant", temperature=0)
+            metrics_block = {
+                "repo_name": repo_name,
+                "total_files": total_files,
+                "total_functions": total_functions,
+                "function_count": function_count,
+                "method_count": method_count,
+                "class_count": class_count,
+                "languages": sorted(languages),
+                "entry_points": entry_names,
+                "core_structures": core_summary,
+                "top_callers": top_callers[:5],
+                "graph_nodes": total_nodes,
+                "graph_edges": total_edges,
+            }
+            prompt = (
+                "You are generating onboarding documentation for a repository that has already been ingested.\n"
+                "Use ONLY the repository metrics and file excerpts provided below.\n"
+                "Do not mention the analyzer platform, ingestion system, or any host application unless it appears in the repo excerpts.\n"
+                "Do not infer frameworks or architecture that are not supported by the input.\n"
+                "Write a detailed but concise onboarding document for a new developer with these sections:\n"
+                "1. What this repository appears to do\n"
+                "2. Architectural shape and major modules\n"
+                "3. Important entry points and execution flow\n"
+                "4. Important files to read first\n"
+                "5. Practical orientation tips\n\n"
+                f"Repository metrics:\n{json.dumps(metrics_block, indent=2, ensure_ascii=False)}\n\n"
+                f"Repository file excerpts:\n{json.dumps(repo_file_samples, indent=2, ensure_ascii=False)}"
+            )
+            response = llm.invoke(prompt)
+            llm_content = getattr(response, "content", None) or str(response)
+        except Exception as exc:
+            print(f"Warning: repository documentation LLM generation failed for {repo_name}: {exc}")
+
+    return {
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "content": (llm_content or _fallback_summary()).strip(),
+        "top_files": [_strip_repo_prefix(f[0]) for f in top_files],
+        "entry_points": entry_names,
+        "core_structures": core_summary,
+        "language_extensions": sorted(languages),
+    }
 
 
 def _process_repo_file(
@@ -881,8 +1078,22 @@ def ingest_repo(
     for rel_path, caller_name, callee_symbol in raw_call_records:
         caller_fqn = f"{rel_path}:{caller_name}"
         candidates = symbol_to_fqn.get(callee_symbol) or []
-        callee_fqn = candidates[0] if candidates else callee_symbol
-        call_graph.setdefault(caller_fqn, set()).add(callee_fqn)
+        
+        # Prefer same-file callee (most likely internal call)
+        callee_fqn = None
+        for candidate in candidates:
+            if candidate.startswith(f"{rel_path}:"):
+                callee_fqn = candidate
+                break
+        
+        # Fall back to first candidate if no same-file match
+        if not callee_fqn and candidates:
+            callee_fqn = candidates[0]
+        
+        # Only add to call_graph if we resolved to a repo symbol
+        # Skip unresolved external names (len, strip, etc.)
+        if callee_fqn and ":" in callee_fqn:
+            call_graph.setdefault(caller_fqn, set()).add(callee_fqn)
 
     symbol_metadata = _build_symbol_metadata(symbol_resolver)
     boot_chain = _build_boot_chain(call_graph, symbol_metadata, repo_name)
@@ -1038,6 +1249,35 @@ def ingest_repo(
     os.makedirs(paths["vector_dir"], exist_ok=True)
     vectorstore.save_local(paths["vector_dir"])
     print(f"Saved FAISS vector store to `{paths['vector_dir']}`")
+
+    # Generate persistent onboarding documentation (precomputed)
+    documentation = _generate_repository_documentation(
+        repo_name=repo_name,
+        repo_path=repo_path,
+        symbol_resolver=symbol_resolver,
+        call_graph=call_graph,
+        boot_chain=boot_chain,
+        core_structures=core_structures,
+        kg_builder=kg_builder,
+    )
+    documentation_path = os.path.join(paths["data_dir"], "documentation.json")
+    with open(documentation_path, "w", encoding="utf-8") as handle:
+        json.dump(documentation, handle, indent=2, ensure_ascii=False)
+    print(f"Saved onboarding documentation to `{documentation_path}`")
+
+    if compute_health_payload:
+        try:
+            health_payload = compute_health_payload(
+                repo_path,
+                _make_json_safe(call_graph),
+                _make_json_safe(symbol_data),
+            )
+            health_path = os.path.join(paths["data_dir"], "code_health.json")
+            with open(health_path, "w", encoding="utf-8") as handle:
+                json.dump(health_payload, handle, indent=2, ensure_ascii=False, default=str)
+            print(f"Saved code health analysis to `{health_path}`")
+        except Exception as exc:
+            print(f"Warning: failed to precompute code health for {repo_name}: {exc}")
     
     # ============ PRINT TIMING SUMMARY ============
     total_duration = time.time() - overall_start_time

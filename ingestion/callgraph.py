@@ -9,6 +9,7 @@ def extract_python_calls(text: str) -> List[Tuple[str, str]]:
     """
     Use Python AST to extract function -> function calls (within a file).
     Returns list of (caller_name, callee_symbol).
+    Only returns repo-level function/method calls, filters out obvious builtins.
     """
     calls = []
     try:
@@ -17,6 +18,19 @@ def extract_python_calls(text: str) -> List[Tuple[str, str]]:
         return calls
 
     current_func = None
+    current_class = None
+    # Common builtins to filter out
+    COMMON_BUILTINS = {
+        'print', 'len', 'range', 'str', 'int', 'float', 'list', 'dict', 'set', 'tuple',
+        'open', 'close', 'read', 'write', 'append', 'extend', 'strip', 'split', 'join',
+        'format', 'upper', 'lower', 'startswith', 'endswith', 'replace', 'find', 'count',
+        'items', 'keys', 'values', 'get', 'pop', 'update', 'clear', 'sort', 'reverse',
+        'enumerate', 'zip', 'map', 'filter', 'sum', 'min', 'max', 'abs', 'round',
+        'isinstance', 'hasattr', 'getattr', 'setattr', 'callable', 'type', 'super',
+        'compile', 'dump', 'load', 'loads', 'dumps', 'json', 'findall', 'search',
+        'remove', 'insert', 'copy', 'deepcopy', 'randint', 'randn', 'squeeze', 'tanh',
+        'matmul', 'reduce_sum', 'softmax', 'expand_dims', 'generate_content', 'render_template'
+    }
 
     class CallVisitor(ast.NodeVisitor):
         def visit_FunctionDef(self, node):
@@ -31,6 +45,12 @@ def extract_python_calls(text: str) -> List[Tuple[str, str]]:
             self.generic_visit(node)
             current_func = None
 
+        def visit_ClassDef(self, node):
+            nonlocal current_class
+            current_class = node.name
+            self.generic_visit(node)
+            current_class = None
+
         def visit_Call(self, node):
             if current_func:
                 callee = None
@@ -38,7 +58,7 @@ def extract_python_calls(text: str) -> List[Tuple[str, str]]:
                     callee = node.func.id
                 elif isinstance(node.func, ast.Attribute):
                     callee = node.func.attr
-                if callee:
+                if callee and callee not in COMMON_BUILTINS:
                     calls.append((current_func, callee))
             self.generic_visit(node)
 

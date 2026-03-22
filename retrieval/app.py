@@ -117,14 +117,17 @@ st.set_page_config(page_title="Chat with Your Codebase", layout="wide")
 st.title("💬 Chat with Your Codebase – Multi-Repo + Multi-Hop + Call Graph")
 
 LANGCHAIN_PROJECT = "chat-with-codebase"
-os.environ["LANGCHAIN_TRACING_V2"] = "true"
+os.environ["LANGCHAIN_TRACING_V2"] = "false"
+os.environ["LANGCHAIN_TRACING"] = "false"
 os.environ["LANGCHAIN_PROJECT"] = LANGCHAIN_PROJECT
 
-try:
-    client = Client()
-    print(f"✅ LangSmith connected: {client.api_url}")
-except Exception:
-    print("⚠️ LangSmith inactive")
+# Temporarily disable LangSmith tracing/requests to avoid monthly rate limit usage.
+os.environ.pop("LANGCHAIN_API_KEY", None)
+os.environ.pop("LANGCHAIN_LLM_ENDPOINT", None)
+os.environ.pop("LANGCHAIN_LIVE_CHAT_API_KEY", None)
+
+client = None
+print("⚠️ LangSmith tracing is disabled to prevent API quota exhaustion.")
 
 # Initialize session state for multi-repo support
 if "active_repo" not in st.session_state:
