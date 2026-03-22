@@ -14,12 +14,13 @@ from retrieval import multi_hop_retrieve, infer_metadata_filters_from_query
 class MultiStepReasoningChain:
     """Multi-step reasoning chain for sophisticated code question answering."""
     
-    def __init__(self, llm, vectorstore, graph_retriever=None, kg=None, call_graph=None):
+    def __init__(self, llm, vectorstore, graph_retriever=None, kg=None, call_graph=None, repo_name=None):
         self.llm = llm
         self.vectorstore = vectorstore
         self.graph_retriever = graph_retriever
         self.kg = kg or {}
         self.call_graph = call_graph or {}
+        self.repo_name = repo_name
     
     def step1_classify_intent(self, query: str) -> dict:
         """Classify the intent of the user's question."""
@@ -147,7 +148,7 @@ Be specific and include all reasonable interpretations.
         print("🔎 Step 3: Retrieving with graph walk...")
         inferred_filters = infer_metadata_filters_from_query(query)
         base_docs = multi_hop_retrieve(
-            query, inferred_filters, hops=2, base_k=16, top_k=8
+            query, inferred_filters, repo_name=self.repo_name, hops=2, base_k=16, top_k=8
         )
         
         retrieved = list(base_docs)
@@ -315,7 +316,8 @@ def get_reasoning_chain(repo_name: str):  # 🔁 CHANGED
             vectorstore=vectorstore,
             graph_retriever=graph_retriever,
             kg=kg,
-            call_graph=call_graph
+            call_graph=call_graph,
+            repo_name=repo_name,
         )
         print(f"✅ Multi-step reasoning chain initialized for {repo_name}")
         return chain

@@ -13,6 +13,8 @@ try:
         TARGET_REPO_DIR,
         _get_repo_paths,
     )
+    from .api_ingestion import ingest_repo_via_api
+    from .incremental_update import update_repo_via_api
 except ImportError:
     # Fallback: Define constants directly if import fails
     import os
@@ -26,11 +28,15 @@ except ImportError:
     # Functions will be None if import fails
     ingest_repo = None
     ingest_repos = None
+    ingest_repo_via_api = None
+    update_repo_via_api = None
     _get_repo_paths = None
 
 __all__ = [
     'ingest_repo',
     'ingest_repos',
+    'ingest_repo_via_api',
+    'update_repo_via_api',
     'EXTENSIONS',
     'EMBED_MODEL',
     'PROJECT_ROOT',

@@ -4,11 +4,20 @@ Streamlit visualization for Code Health & Quality analysis.
 
 import streamlit as st
 import json
+import os
 import pandas as pd
 from typing import Dict, List, Optional
 from code_health import CodeStatistics, HealthScoreCalculator, CodeSmellDetector, RefactoringAdvisor
 from code_health.enhanced_analysis import EnhancedHealthAnalyzer
 from code_health.enhanced_refactoring import EnhancedRefactoringAdvisor
+
+# ===============================
+# Evaluation metrics collection
+# ===============================
+try:
+    from evaluation.collector import save_code_health_metrics
+except ImportError:
+    save_code_health_metrics = None
 
 
 def _detect_code_language(file_stats: Dict) -> str:
@@ -55,7 +64,7 @@ def render_code_health_tab(repo_path: str, call_graph: Dict, symbol_table: Dict)
             print(f"[DEBUG] Input symbol_table type: {type(symbol_table)}")
             print(f"[DEBUG] Input symbol_table keys: {list(symbol_table.keys()) if isinstance(symbol_table, dict) else 'NOT A DICT'}")
             
-            # Validate and normalize symbol table
+            # Validate and normalize symbol table for smell/pattern detection
             normalized_symbol_table = _normalize_symbol_table(symbol_table)
             
             # Debug: Log normalized structure
@@ -66,8 +75,18 @@ def render_code_health_tab(repo_path: str, call_graph: Dict, symbol_table: Dict)
             if not isinstance(call_graph, dict):
                 call_graph = {}
             
+            # Resolve repo_path: if the original path doesn't exist or is empty,
+            # try to find the api_source snapshot directory
+            resolved_repo_path = _resolve_repo_path(repo_path)
+            
+            # Pass the FULL symbol_table (with file_symbols) to CodeStatistics
+            # so it can derive stats from symbol data when source files aren't on disk.
+            # The raw symbol_table has {global_index: ..., file_symbols: {...}} which
+            # CodeStatistics uses as a fallback.
+            full_symbol_table = symbol_table if isinstance(symbol_table, dict) else {}
+            
             # Compute statistics
-            stats_computer = CodeStatistics(repo_path, call_graph, normalized_symbol_table)
+            stats_computer = CodeStatistics(resolved_repo_path, call_graph, full_symbol_table)
             stats = stats_computer.compute_all_statistics()
             
             # Ensure repo_stats is valid before proceeding
@@ -86,13 +105,52 @@ def render_code_health_tab(repo_path: str, call_graph: Dict, symbol_table: Dict)
             health_result = health_calculator.calculate_overall_health()
             file_scores = health_calculator.calculate_file_scores()
             
-            # Detect smells
-            smell_detector = CodeSmellDetector(stats, call_graph, normalized_symbol_table, repo_path)
+            # Detect smells (uses normalized flat symbol table)
+            smell_detector = CodeSmellDetector(stats, call_graph, normalized_symbol_table, resolved_repo_path)
             smells = smell_detector.detect_all_smells()
             
             # Generate refactoring suggestions
             advisor = RefactoringAdvisor(smells, stats)
             suggestions = advisor.generate_suggestions()
+            
+            # ============ SAVE CODE HEALTH METRICS ============
+            if save_code_health_metrics:
+                try:
+                    # Extract repo name from resolved path
+                    repo_name = os.path.basename(resolved_repo_path).replace("api_source_", "").replace("data_", "")
+                    
+                    # Calculate dimension scores
+                    dimension_scores = {}
+                    for dimension, weight in health_result.get('weights', {}).items():
+                        score = health_result.get('dimension_scores', {}).get(dimension, 0)
+                        dimension_scores[dimension] = score
+                    
+                    # Count file scores
+                    file_score_dist = {}
+                    for file_path, score in file_scores.items():
+                        bucket = f"{int(score // 10) * 10}-{int(score // 10) * 10 + 10}"
+                        file_score_dist[bucket] = file_score_dist.get(bucket, 0) + 1
+                    
+                    save_code_health_metrics(
+                        repo_name=repo_name,
+                        overall_score=float(health_result.get('overall_score', 0)),
+                        grade=health_result.get('interpretation', {}).get('grade', 'N/A'),
+                        dimension_scores=dimension_scores,
+                        repository_stats=stats.to_dict() if hasattr(stats, 'to_dict') else {},
+                        smell_summary={
+                            "total_smells": len(smells),
+                            "by_severity": {
+                                "critical": sum(1 for s in smells if s.get("severity") == "critical"),
+                                "high": sum(1 for s in smells if s.get("severity") == "high"),
+                                "medium": sum(1 for s in smells if s.get("severity") == "medium"),
+                                "low": sum(1 for s in smells if s.get("severity") == "low"),
+                            },
+                        },
+                        suggestion_count=len(suggestions),
+                        file_score_distribution=file_score_dist,
+                    )
+                except Exception as e:
+                    print(f"[Evaluation] Warning: Failed to save code health metrics: {e}")
             
         except Exception as e:
             st.error(f"[ERROR] Error during analysis: {e}")
@@ -648,6 +706,57 @@ def render_code_health_tab(repo_path: str, call_graph: Dict, symbol_table: Dict)
             file_name="file_scores.csv",
             mime="text/csv",
         )
+
+
+def _resolve_repo_path(repo_path: str) -> str:
+    """
+    Resolve repo_path to an existing directory with source files.
+    
+    After API/ZIP ingestion, the original temp directory may be cleaned up.
+    Try to find source files in the api_source snapshot directory or the
+    original repo path.
+    
+    Args:
+        repo_path: Original repository path
+    
+    Returns:
+        A valid path to source files, or the original path as fallback
+    """
+    import os
+    
+    # If the path exists and has files, use it directly
+    if repo_path and os.path.isdir(repo_path):
+        has_files = any(
+            f for _, _, files in os.walk(repo_path) for f in files
+            if os.path.splitext(f)[1] in ('.py', '.js', '.java', '.ts', '.go', '.rs', '.c', '.cpp', '.h')
+        )
+        if has_files:
+            return repo_path
+    
+    # Try to find the api_source snapshot directory
+    # The ingestion system stores source snapshots in data/<repo_name>/api_source/
+    try:
+        # Try common data directory patterns
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        data_dir = os.path.join(project_root, "data")
+        
+        if os.path.isdir(data_dir):
+            # Look for any api_source directory under data/
+            for entry in os.listdir(data_dir):
+                api_source = os.path.join(data_dir, entry, "api_source")
+                if os.path.isdir(api_source):
+                    has_files = any(
+                        f for _, _, files in os.walk(api_source) for f in files
+                        if os.path.splitext(f)[1] in ('.py', '.js', '.java', '.ts', '.go', '.rs', '.c', '.cpp', '.h')
+                    )
+                    if has_files:
+                        print(f"[Code Health] Using api_source snapshot: {api_source}")
+                        return api_source
+    except Exception:
+        pass
+    
+    # Return original path as fallback (stats.py will use symbol_table fallback)
+    return repo_path or ""
 
 
 def _normalize_symbol_table(symbol_table: Dict) -> Dict:

@@ -13,6 +13,8 @@ try:
     _HAS_TREE_SITTER = True
 except Exception:
     _HAS_TREE_SITTER = False
+    Node = Any
+    Language = Any
 
 
 class TreeSitterSemanticAnalyzer:
@@ -178,6 +180,7 @@ class TreeSitterSemanticAnalyzer:
         
         if node.type in class_def_types:
             self._handle_class_definition(node)
+            return
         
         # Handle function/method definitions
         func_def_types = config.get("func_def", [])
@@ -190,6 +193,7 @@ class TreeSitterSemanticAnalyzer:
             # Determine if this is a method (inside a class)
             is_method = parent_class is not None
             self._handle_function_definition(node, is_method, parent_class)
+            return
         
         # Handle import statements
         import_types = config.get("import_stmt", [])

@@ -1,19 +1,134 @@
 # ingest.py - Main ingestion pipeline orchestrator
 
-import os
+import gc
 import json
-from typing import Dict, Any
+import os
+import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from typing import Any, Dict, List, Optional
+
+# ===============================
+# Import core ingestion modules
+# ===============================
+try:
+    from .chunking import extract_chunks
+except ImportError:
+    extract_chunks = None
+
+try:
+    from .resolver import SymbolResolver
+except ImportError:
+    SymbolResolver = None
+
+try:
+    from .knowledge_graph import KnowledgeGraphBuilder
+except ImportError:
+    KnowledgeGraphBuilder = None
+
+try:
+    from .utils import clone_or_open_repo, get_repo_head_info, list_repo_files
+except ImportError:
+    clone_or_open_repo = None
+    get_repo_head_info = None
+    list_repo_files = None
+
+try:
+    from .symbols import extract_symbols_unified
+except ImportError:
+    extract_symbols_unified = None
+
+try:
+    from .semantic_analyzer import extract_function_dataflow, extract_async_patterns
+except ImportError:
+    extract_function_dataflow = None
+    extract_async_patterns = None
+
+try:
+    from .contributions import extract_contributions
+except ImportError:
+    extract_contributions = None
+
+try:
+    from .chunking import EXT_TO_TS_LANG, Document
+except ImportError:
+    EXT_TO_TS_LANG = {}
+    Document = None
+
+try:
+    from .callgraph import extract_calls_unified
+except ImportError:
+    extract_calls_unified = None
+
+try:
+    from langchain_community.embeddings import HuggingFaceEmbeddings
+    from langchain_community.vectorstores import FAISS
+except ImportError:
+    HuggingFaceEmbeddings = None
+    FAISS = None
+
+try:
+    from .zip_ingestion import download_and_extract_repo
+except ImportError:
+    download_and_extract_repo = None
+
+try:
+    from .github_loader import get_repo_metadata
+except ImportError:
+    get_repo_metadata = None
+
+try:
+    from evaluation.collector import save_ingestion_metrics, save_contribution_metrics, save_graph_metrics
+except ImportError:
+    save_ingestion_metrics = None
+    save_contribution_metrics = None
+    save_graph_metrics = None
 
 # ===============================
 # CRITICAL: Define constants FIRST before any other imports
 # This ensures they're always available even if other imports fail
 # ===============================
-# Get project root (parent of ingestion/ folder)
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-EXTENSIONS = ('.py', '.js', '.java', '.ts', '.md', '.txt', '.go', '.cpp', '.c', '.h', '.rs')
+EXTENSIONS = (".py", ".js", ".java", ".ts", ".md", ".txt", ".go", ".cpp", ".c", ".h", ".rs")
 EMBED_MODEL = "mixedbread-ai/mxbai-embed-large-v1"
 BOOT_ENTRY_CANDIDATES = ("main", "app", "run", "start", "__main__")
+SUPPORTED_ANALYSIS_EXTENSIONS = {
+    ".py", ".java", ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs"
+}
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+EMBED_BATCH_SIZE = max(16, _env_int("INGEST_EMBED_BATCH_SIZE", 128))
+FILE_WORKERS = max(1, _env_int("INGEST_FILE_WORKERS", min(8, (os.cpu_count() or 4))))
+MAX_IN_FLIGHT_FILES = max(FILE_WORKERS, _env_int("INGEST_MAX_IN_FLIGHT_FILES", FILE_WORKERS * 2))
+PROGRESS_LOG_EVERY = max(1, _env_int("INGEST_PROGRESS_EVERY", 25))
+GC_COLLECT_EVERY = max(0, _env_int("INGEST_GC_COLLECT_EVERY", 100))
+ENABLE_CONTRIBUTION_ANALYSIS_BY_DEFAULT = _env_bool("INGEST_ANALYZE_CONTRIBUTIONS", False)
+CONTRIBUTION_MAX_COMMITS = max(0, _env_int("INGEST_CONTRIBUTION_MAX_COMMITS", 500))
+CONTRIBUTION_INCLUDE_DETAILS = _env_bool("INGEST_CONTRIBUTION_INCLUDE_DETAILS", True)
+
+# ===============================
+# API vs ZIP INGESTION THRESHOLDS
+# ===============================
+MAX_API_FILES = _env_int("MAX_API_FILES", 1500)
+MAX_API_SIZE_MB = _env_int("MAX_API_SIZE_MB", 50)
+MAX_API_ESTIMATED_CALLS = _env_int("MAX_API_ESTIMATED_CALLS", 2000)
 
 
 def _get_repo_paths(repo_name: str = None):
@@ -24,7 +139,7 @@ def _get_repo_paths(repo_name: str = None):
     else:
         repo_dir = os.path.join(PROJECT_ROOT, "repos", "myrepo")
         data_dir = os.path.join(PROJECT_ROOT, "data")
-    
+
     return {
         "repo_dir": repo_dir,
         "vector_dir": os.path.join(data_dir, "vector_store"),
@@ -213,9 +328,7 @@ def _build_core_structures(symbol_resolver, kg_builder, repo_name: str) -> Dict[
             )[:25],
         })
 
-    structures.sort(
-        key=lambda item: (-item["contained_symbol_count"], item["name"], item["file"])
-    )
+    structures.sort(key=lambda item: (-item["contained_symbol_count"], item["name"], item["file"]))
     return {
         "repo_name": repo_name,
         "structures": structures[:20],
@@ -223,195 +336,535 @@ def _build_core_structures(symbol_resolver, kg_builder, repo_name: str) -> Dict[
     }
 
 
-# Backward compatibility: Default paths for single-repo mode
-# CRITICAL: Define these BEFORE any other imports that might fail
 _default_paths = _get_repo_paths(None)
 VECTOR_DIR = _default_paths["vector_dir"]
 CALLGRAPH_PATH = _default_paths["callgraph_path"]
 TARGET_REPO_DIR = _default_paths["repo_dir"]
 
-# Now import other modules (these may fail, but constants are already defined)
 try:
     from dotenv import load_dotenv
+
     try:
         load_dotenv()
     except Exception:
-        pass  # dotenv is optional
+        pass
 except ImportError:
-    pass  # dotenv not installed
+    pass
 
 try:
     from langchain_community.vectorstores import FAISS
-    from langchain_huggingface import HuggingFaceEmbeddings
     from langchain_core.documents import Document
+    from langchain_huggingface import HuggingFaceEmbeddings
 except ImportError:
     FAISS = None
-    HuggingFaceEmbeddings = None
     Document = None
+    HuggingFaceEmbeddings = None
 
-# Import modular components
 try:
-    from .symbols import extract_python_symbols, extract_symbols_unified
-    from .dataflow import extract_function_dataflow
     from .async_extractor import extract_async_patterns
-    from .knowledge_graph import KnowledgeGraphBuilder
-    from .chunking import extract_chunks, EXT_TO_TS_LANG
-    from .callgraph import extract_python_calls, extract_js_ts_calls, extract_calls_unified
-    from .resolver import SymbolResolver
-    from .utils import clone_or_open_repo, list_repo_files, get_commit_info
+    from .callgraph import extract_calls_unified
+    from .chunking import EXT_TO_TS_LANG, extract_chunks
     from .contributions import extract_contributions
+    from .dataflow import extract_function_dataflow
+    from .knowledge_graph import KnowledgeGraphBuilder
+    from .resolver import SymbolResolver
+    from .symbols import extract_symbols_unified
+    from .utils import clone_or_open_repo, get_repo_head_info, list_repo_files
+    from .github_loader import get_repo_metadata
+    from .zip_ingestion import download_and_extract_repo, cleanup_zip_extraction, list_files_from_zip
+    from .github_contributions import extract_contributions_via_api, save_contributions
 except ImportError as e:
-    # If imports fail, at least constants are available
     print(f"Warning: Some ingestion modules failed to import: {e}")
-    # Define stubs to prevent NameError
-    extract_python_symbols = None
-    extract_symbols_unified = None
-    extract_function_dataflow = None
     extract_async_patterns = None
-    KnowledgeGraphBuilder = None
-    extract_chunks = None
-    EXT_TO_TS_LANG = {}
-    extract_python_calls = None
-    extract_js_ts_calls = None
     extract_calls_unified = None
-    SymbolResolver = None
-    clone_or_open_repo = None
-    list_repo_files = None
-    get_commit_info = None
+    EXT_TO_TS_LANG = {}
+    extract_chunks = None
     extract_contributions = None
+    extract_function_dataflow = None
+    KnowledgeGraphBuilder = None
+    SymbolResolver = None
+    extract_symbols_unified = None
+    clone_or_open_repo = None
+    get_repo_head_info = None
+    list_repo_files = None
+    get_repo_metadata = None
+    download_and_extract_repo = None
+    cleanup_zip_extraction = None
+    list_files_from_zip = None
+    extract_contributions_via_api = None
+    save_contributions = None
 
 
-# ===============================
-# 🚀 MAIN INGESTION PIPELINE
-# ===============================
-def ingest_repo(repo_url_or_path: str, repo_name: str = None, return_data: bool = False):
-    """
-    Main ingestion pipeline that orchestrates all modules.
+def _file_priority(file_path: str, repo_path: str):
+    """Prioritize likely entry/config files and smaller files first."""
+    rel_path = os.path.relpath(file_path, repo_path).replace("\\", "/").lower()
+    base_name = os.path.basename(file_path).lower()
+    important_names = (
+        "main.py", "app.py", "__main__.py", "index.js", "main.js", "app.js",
+        "package.json", "pyproject.toml", "setup.py", "manage.py", "dockerfile",
+        "requirements.txt", "tsconfig.json", "vite.config.ts", "next.config.js",
+    )
+
+    priority = 2
+    if base_name in important_names:
+        priority = 0
+    elif any(token in rel_path for token in ("config", "settings", "routes", "server", "entry", "main", "app")):
+        priority = 1
+
+    try:
+        size = os.path.getsize(file_path)
+    except OSError:
+        size = 0
+
+    return (priority, size, rel_path)
+
+
+def _parse_github_url(repo_url: str) -> tuple:
+    """Parse GitHub URL to extract owner/repo. Returns (owner, repo) or (None, None)."""
+    if not isinstance(repo_url, str) or "github.com" not in repo_url.lower():
+        return None, None
     
-    Args:
-        repo_url_or_path: URL or local path to the repository
-        repo_name: Optional name identifier for the repo (used for paths)
-        return_data: If True, return the data structures instead of saving to disk
+    try:
+        if "github.com/" in repo_url:
+            parts = repo_url.split("github.com/")[1].split("/")
+        elif "github.com:" in repo_url:
+            parts = repo_url.split("github.com:")[1].split("/")
+        else:
+            return None, None
+        
+        if len(parts) >= 2:
+            return parts[0], parts[1].replace(".git", "").strip()
+    except:
+        pass
+    
+    return None, None
+
+
+def _should_use_zip(owner: str, repo: str, token: Optional[str]) -> tuple:
+    """Check if repo size exceeds API thresholds, requiring ZIP ingestion.
     
     Returns:
-        If return_data=True, returns dict with documents, call_graph, symbol_resolver, etc.
-        Otherwise returns None.
+        (use_zip: bool, default_branch: str)
     """
-    # Generate repo name from URL if not provided
+    default_branch = "main"
+    try:
+        if not get_repo_metadata:
+            return False, default_branch
+        
+        metadata = get_repo_metadata(owner, repo, token=token)
+        if not metadata or "size" not in metadata:
+            return False, default_branch
+        
+        default_branch = metadata.get("default_branch", "main")
+        size_kb = metadata.get("size", 0)
+        size_mb = size_kb / 1024 if size_kb else 0
+        estimated_files = int(size_kb * 0.0003) if size_kb else 0
+        estimated_calls = estimated_files + 10
+        
+        print(f"\n[Repo Analysis] Size: {size_mb:.1f}MB, Files: {estimated_files}, API calls: {estimated_calls}")
+        print(f"  Default branch: {default_branch}")
+        
+        if size_mb > MAX_API_SIZE_MB:
+            print(f"  [Using ZIP] Size exceeds {MAX_API_SIZE_MB}MB")
+            return True, default_branch
+        if estimated_files > MAX_API_FILES:
+            print(f"  [Using ZIP] Files exceed {MAX_API_FILES}")
+            return True, default_branch
+        if estimated_calls > MAX_API_ESTIMATED_CALLS:
+            print(f"  [Using ZIP] API calls exceed {MAX_API_ESTIMATED_CALLS}")
+            return True, default_branch
+        
+        print(f"  [Using API] Within all thresholds")
+        return False, default_branch
+    except Exception as e:
+        print(f"  [Note] Analysis failed ({e}), defaulting to API")
+        return False, default_branch
+
+
+def _format_duration(seconds: float) -> str:
+    """Format duration to human-readable string."""
+    if seconds < 60:
+        return f"{seconds:.2f}s"
+    elif seconds < 3600:
+        return f"{seconds / 60:.2f}m"
+    else:
+        return f"{seconds / 3600:.2f}h"
+
+
+def _process_repo_file(
+    file_path: str,
+    repo_path: str,
+    repo_name: str,
+    repo_commit_sha: str,
+    repo_commit_msg: str,
+    repo_commit_date: Optional[str],
+) -> Dict[str, Any]:
+    """Process a single file and return all extracted artifacts."""
+    with open(file_path, "r", encoding="utf-8", errors="ignore") as handle:
+        content = handle.read()
+
+    if not content.strip():
+        return {"skip": True, "file_path": file_path}
+
+    ext = os.path.splitext(file_path)[1].lower()
+    rel_path = os.path.relpath(file_path, repo_path)
+    prefixed_rel_path = f"{repo_name}:{rel_path}" if repo_name else rel_path
+
+    result: Dict[str, Any] = {
+        "skip": False,
+        "file_path": file_path,
+        "ext": ext,
+        "prefixed_rel_path": prefixed_rel_path,
+        "chunks": [],
+        "documents": [],
+        "symbol_table": None,
+        "dataflow_analysis": None,
+        "async_analysis": None,
+        "raw_calls": [],
+        "used_parser": "unknown",
+    }
+
+    if ext in SUPPORTED_ANALYSIS_EXTENSIONS:
+        if extract_symbols_unified:
+            result["symbol_table"] = extract_symbols_unified(prefixed_rel_path, content)
+
+        if ext == ".py" and extract_function_dataflow:
+            result["dataflow_analysis"] = extract_function_dataflow(prefixed_rel_path, content)
+
+        if ext == ".py" and extract_async_patterns:
+            result["async_analysis"] = extract_async_patterns(prefixed_rel_path, content)
+
+        if extract_calls_unified:
+            result["raw_calls"] = extract_calls_unified(content, ext)
+
+    chunks = extract_chunks(content, ext)
+    result["chunks"] = chunks
+    result["used_parser"] = chunks[0].get("parser_used") if chunks else "unknown"
+
+    for chunk in chunks:
+        name = chunk.get("name")
+        node_type = chunk.get("node_type") or ""
+        language = chunk.get("language") or EXT_TO_TS_LANG.get(ext, ext.lstrip("."))
+        result["documents"].append(
+            Document(
+                page_content=chunk.get("text", "").strip(),
+                metadata={
+                    "path": prefixed_rel_path,
+                    "repo_name": repo_name,
+                    "abs_path": file_path,
+                    "start_line": int(chunk.get("start_line", 1)),
+                    "end_line": int(chunk.get("end_line", chunk.get("start_line", 1))),
+                    "commit_sha": repo_commit_sha,
+                    "commit_message": repo_commit_msg,
+                    "commit_date": repo_commit_date,
+                    "node_type": node_type,
+                    "symbol_name": name,
+                    "language": language,
+                    "parser_used": chunk.get("parser_used", "regex_fallback"),
+                    "params": chunk.get("params"),
+                    "decorators": chunk.get("decorators"),
+                    "imports": chunk.get("imports"),
+                    "parent_class": chunk.get("parent_class"),
+                },
+            )
+        )
+
+    del content
+    return result
+
+
+def _drain_completed_futures(futures, max_items: Optional[int] = None):
+    """Yield completed futures while keeping the backlog bounded."""
+    emitted = 0
+    while futures and (max_items is None or emitted < max_items):
+        done, _ = wait(list(futures.keys()), return_when=FIRST_COMPLETED)
+        for future in done:
+            file_path = futures.pop(future)
+            emitted += 1
+            yield file_path, future
+            if max_items is not None and emitted >= max_items:
+                return
+
+
+def ingest_repo(
+    repo_url_or_path: str,
+    repo_name: str = None,
+    return_data: bool = False,
+    analyze_contributions: Optional[bool] = None,
+    contribution_commit_limit: Optional[int] = None,
+    verbose: bool = False,
+):
+    """Main ingestion pipeline: API by default, ZIP if size thresholds exceeded."""
+    import time
+    import tempfile
+    
+    overall_start_time = time.time()
+    
     if repo_name is None:
         if repo_url_or_path.startswith("http"):
-            # Extract repo name from URL (e.g., github.com/user/repo -> repo)
             repo_name = repo_url_or_path.rstrip("/").split("/")[-1].replace(".git", "")
         else:
-            # Use basename of local path
             repo_name = os.path.basename(os.path.abspath(repo_url_or_path))
+
+    if not all([extract_chunks, SymbolResolver, KnowledgeGraphBuilder]):
+        raise RuntimeError("Required ingestion modules are not available.")
+
+    # ============ REPO LOADING PHASE ============
+    load_start_time = time.time()
     
     paths = _get_repo_paths(repo_name)
-    repo_path = clone_or_open_repo(repo_url_or_path, paths["repo_dir"])
-    documents = []
+    repo_path = None
+    zip_cleanup_root = None
+    ingestion_method = "API"
+    github_token = os.getenv("GITHUB_TOKEN")
+    
+    owner, repo = _parse_github_url(repo_url_or_path)
+    
+    # Default to API; switch to ZIP only if thresholds exceeded
+    default_branch = "main"
+    use_zip = False
+    if owner and repo:
+        use_zip, default_branch = _should_use_zip(owner, repo, github_token)
+    
+    try:
+        if use_zip:
+            # ZIP ingestion for large repos
+            try:
+                print(f"\n[ZIP] Downloading {owner}/{repo} ({default_branch})...")
+                repo_path, _, zip_cleanup_root = download_and_extract_repo(owner, repo, default_branch, github_token)
+                print(f"[ZIP] Repository extracted")
+                ingestion_method = "ZIP"
+            except Exception as e:
+                print(f"[ZIP] Failed: {e}. Falling back to API...")
+                use_zip = False
+        
+        if not use_zip and not repo_path:
+            # API ingestion (default)
+            if owner and repo:
+                try:
+                    from .github_loader import get_repo_tree, get_file_content
+                    
+                    print(f"\n[API] Fetching {owner}/{repo} ({default_branch})...")
+                    repo_path = tempfile.mkdtemp(prefix=f"{repo}_")
+                    zip_cleanup_root = repo_path
+                    
+                    files_to_fetch = get_repo_tree(owner, repo, default_branch, token=github_token)
+                    print(f"[API] Found {len(files_to_fetch)} files, downloading...")
+                    
+                    fetched_count = 0
+                    skipped_count = 0
+                    failed_count = 0
+                    
+                    # Import path-only filter from api_ingestion (doesn't need file on disk)
+                    from .api_ingestion import _path_is_supported
+                    
+                    for file_entry in files_to_fetch:
+                        file_path = file_entry.get("path")
+                        if not file_path:
+                            continue
+                        
+                        # Filter by path/extension/size BEFORE downloading
+                        # (should_skip needs the file on disk; _path_is_supported does not)
+                        if not _path_is_supported(file_path, file_entry.get("size")):
+                            skipped_count += 1
+                            continue
+                        
+                        temp_full_path = os.path.join(repo_path, file_path)
+                        os.makedirs(os.path.dirname(temp_full_path), exist_ok=True)
+                        try:
+                            content = get_file_content(owner, repo, file_path, default_branch, token=github_token)
+                            with open(temp_full_path, "w", encoding="utf-8") as f:
+                                f.write(content)
+                            fetched_count += 1
+                        except Exception as e:
+                            failed_count += 1
+                            if verbose:
+                                print(f"[API] Failed to fetch {file_path}: {e}")
+                    
+                    print(f"[API] Downloaded {fetched_count} files (skipped {skipped_count}, failed {failed_count})")
+                    ingestion_method = "API"
+                except Exception as e:
+                    print(f"[API] Failed: {e}")
+                    if zip_cleanup_root and os.path.exists(zip_cleanup_root):
+                        import shutil
+                        shutil.rmtree(zip_cleanup_root, ignore_errors=True)
+                        zip_cleanup_root = None
+                    raise
+            else:
+                # Fallback to git clone for non-GitHub URLs
+                if clone_or_open_repo:
+                    print(f"\n[Git Clone] Cloning repository...")
+                    repo_path = clone_or_open_repo(repo_url_or_path, paths["repo_dir"])
+                    ingestion_method = "git_clone"
+                else:
+                    raise RuntimeError("Cannot ingest non-GitHub URL without git clone support")
+    
+    except Exception as e:
+        print(f"Error during repo loading: {e}")
+        raise
+    
+    load_duration = time.time() - load_start_time
+    
+    repo_commit_sha, repo_commit_msg, repo_commit_date = (
+        get_repo_head_info(repo_path) if get_repo_head_info else ("unknown", "No commit message found", None)
+    )
+    analyze_contributions = (
+        ENABLE_CONTRIBUTION_ANALYSIS_BY_DEFAULT if analyze_contributions is None else analyze_contributions
+    )
+    contribution_commit_limit = (
+        CONTRIBUTION_MAX_COMMITS if contribution_commit_limit is None else contribution_commit_limit
+    )
 
-    # Initialize analyzers and builders
-    symbol_to_fqn = {}  # simple function name -> list of FQNs
-    file_records = []   # (rel_path, ext, content)
+    all_documents = [] if return_data else None
+    pending_documents: List[Document] = []
+    raw_call_records: List[tuple] = []
+
+    symbol_to_fqn = {}
     symbol_resolver = SymbolResolver()
     dataflow_by_file: Dict[str, Dict[str, Any]] = {}
     async_patterns_by_file: Dict[str, Dict[str, Any]] = {}
     kg_builder = KnowledgeGraphBuilder()
     call_graph = {}
-    boot_chain = {}
 
-    print(f"🔍 Scanning repository: {repo_path} (repo_name: {repo_name})")
+    embeddings = None
+    vectorstore = None
+    total_documents = 0
 
-    # ========== FIRST PASS: CHUNKS + SYMBOL TABLE + DATA FLOW ==========
-    for file_path in list_repo_files(repo_path, EXTENSIONS):
-        try:
-            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                content = f.read()
-            if not content.strip():
-                continue
+    def flush_document_batch():
+        nonlocal embeddings, pending_documents, total_documents, vectorstore
+        if not pending_documents:
+            return
 
-            ext = os.path.splitext(file_path)[1].lower()
-            rel_path = os.path.relpath(file_path, repo_path)
-            # Prefix rel_path with repo_name to avoid conflicts across repos
-            prefixed_rel_path = f"{repo_name}:{rel_path}" if repo_name else rel_path
+        if HuggingFaceEmbeddings is None or FAISS is None:
+            raise RuntimeError("Embedding dependencies are not installed.")
 
-            file_records.append((prefixed_rel_path, ext, content))
+        if embeddings is None:
+            embeddings = HuggingFaceEmbeddings(model_name=EMBED_MODEL)
 
-            # Extract symbols using unified analyzer for ALL supported languages
-            # Supports: Python, Java, C/C++, JavaScript/TypeScript, Go, Rust
-            supported_langs = {".py", ".java", ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", 
-                              ".js", ".ts", ".tsx", ".jsx", ".go", ".rs"}
-            
-            if ext in supported_langs:
-                try:
-                    # Use Python AST for .py, Tree-sitter semantic analyzer for others
-                    symbol_table = extract_symbols_unified(prefixed_rel_path, content)
-                    symbol_resolver.add_symbol_table(prefixed_rel_path, symbol_table)
-                    print(f"📊 Extracted {len(symbol_table.all_symbols)} symbols from {prefixed_rel_path}")
-                    
-                    # Extract data flow analysis (currently only for Python)
-                    if ext == ".py":
-                        dataflow_analysis = extract_function_dataflow(prefixed_rel_path, content)
-                        if dataflow_analysis:
-                            dataflow_by_file[prefixed_rel_path] = dataflow_analysis
-                            print(f"🔄 Data flow analysis for {len(dataflow_analysis)} functions in {prefixed_rel_path}")
-                        if extract_async_patterns:
-                            async_analysis = extract_async_patterns(prefixed_rel_path, content)
-                            if async_analysis:
-                                async_patterns_by_file[prefixed_rel_path] = async_analysis
-                                print(f"⏱️ Async pattern analysis found {async_analysis.get('pattern_count', 0)} pattern(s) in {prefixed_rel_path}")
-                except Exception as e:
-                    print(f"⚠️ Symbol extraction failed for {prefixed_rel_path}: {e}")
+        batch = pending_documents
+        pending_documents = []
 
-            # Extract code chunks
-            chunks = extract_chunks(content, ext)
-            commit_sha, commit_msg, commit_date = get_commit_info(repo_path, file_path)
+        if vectorstore is None:
+            vectorstore = FAISS.from_documents(batch, embeddings)
+        else:
+            vectorstore.add_documents(batch)
 
-            for c in chunks:
-                name = c.get("name")
-                node_type = c.get("node_type") or ""
-                language = c.get("language") or EXT_TO_TS_LANG.get(ext, ext.lstrip("."))
+        total_documents += len(batch)
+        print(f"Embedded {total_documents} chunk(s) so far...")
+        if return_data and all_documents is not None:
+            all_documents.extend(batch)
 
-                # Build symbol index for functions/methods (ALL LANGUAGES)
-                if name and any(t in str(node_type).lower() for t in ["function", "method", "class"]):
-                    fqn = f"{prefixed_rel_path}:{name}"
-                    symbol_to_fqn.setdefault(name, []).append(fqn)
+    # ============ FILE PROCESSING PHASE ============
+    process_start_time = time.time()
+    
+    print(f"\nScanning repository: {repo_path} (repo_name: {repo_name})")
 
-                doc_metadata = {
-                    "path": prefixed_rel_path,
-                    "repo_name": repo_name,
-                    "abs_path": file_path,
-                    "start_line": int(c.get("start_line", 1)),
-                    "end_line": int(c.get("end_line", c.get("start_line", 1))),
-                    "commit_sha": commit_sha,
-                    "commit_message": commit_msg,
-                    "commit_date": commit_date,
-                    "node_type": node_type,
-                    "symbol_name": name,
-                    "language": language,
-                    "parser_used": c.get("parser_used", "regex_fallback"),
-                    "params": c.get("params"),
-                    "decorators": c.get("decorators"),
-                    "imports": c.get("imports"),
-                    "parent_class": c.get("parent_class"),
-                }
-                doc = Document(
-                    page_content=c.get("text", "").strip(),
-                    metadata=doc_metadata,
+    ordered_files = sorted(list_repo_files(repo_path, EXTENSIONS), key=lambda path: _file_priority(path, repo_path))
+
+    processed_files = 0
+    total_files = len(ordered_files)
+
+    def merge_processed_file(result: Dict[str, Any]):
+        nonlocal processed_files
+        prefixed_rel_path = result.get("prefixed_rel_path")
+        if not prefixed_rel_path:
+            return
+        processed_files += 1
+
+        symbol_table = result.get("symbol_table")
+        if symbol_table is not None:
+            symbol_resolver.add_symbol_table(prefixed_rel_path, symbol_table)
+            if verbose:
+                print(f"Extracted {len(symbol_table.all_symbols)} symbols from {prefixed_rel_path}")
+
+        dataflow_analysis = result.get("dataflow_analysis")
+        if dataflow_analysis:
+            dataflow_by_file[prefixed_rel_path] = dataflow_analysis
+            if verbose:
+                print(f"Data flow analysis for {len(dataflow_analysis)} functions in {prefixed_rel_path}")
+
+        async_analysis = result.get("async_analysis")
+        if async_analysis:
+            async_patterns_by_file[prefixed_rel_path] = async_analysis
+            if verbose:
+                print(
+                    f"Async pattern analysis found {async_analysis.get('pattern_count', 0)} pattern(s) in {prefixed_rel_path}"
                 )
-                documents.append(doc)
 
-            used_parser = chunks[0].get("parser_used") if chunks else "unknown"
-            print(f"✅ Processed {file_path} using {used_parser} ({len(chunks)} chunks)")
+        for caller_name, callee_symbol in result.get("raw_calls", []):
+            raw_call_records.append((prefixed_rel_path, caller_name, callee_symbol))
 
-        except Exception as e:
-            print(f"⚠️ Skipped {file_path}: {e}")
+        for chunk in result.get("chunks", []):
+            name = chunk.get("name")
+            node_type = chunk.get("node_type") or ""
+            if name and any(token in str(node_type).lower() for token in ("function", "method", "class")):
+                symbol_to_fqn.setdefault(name, []).append(f"{prefixed_rel_path}:{name}")
 
-    print(f"✅ Loaded {len(documents)} chunks total from {repo_path}")
-    print(f"📚 Indexed {len(symbol_resolver.symbol_tables)} Python files with symbol tables")
+        pending_documents.extend(result.get("documents", []))
+        if len(pending_documents) >= EMBED_BATCH_SIZE:
+            flush_document_batch()
 
-    if not documents:
-        print("⚠️ No documents to embed; aborting ingestion.")
+        if verbose:
+            print(
+                f"Processed {result['file_path']} using {result.get('used_parser', 'unknown')} "
+                f"({len(result.get('chunks', []))} chunks)"
+            )
+        elif processed_files % PROGRESS_LOG_EVERY == 0 or processed_files == total_files:
+            print(
+                f"Processed {processed_files}/{total_files} file(s); "
+                f"queued {len(pending_documents)} chunk(s) for embedding."
+            )
+
+    with ThreadPoolExecutor(max_workers=FILE_WORKERS) as executor:
+        futures = {}
+        file_iter = iter(ordered_files)
+
+        def submit_more():
+            while len(futures) < MAX_IN_FLIGHT_FILES:
+                try:
+                    next_file = next(file_iter)
+                except StopIteration:
+                    break
+                future = executor.submit(
+                    _process_repo_file,
+                    next_file,
+                    repo_path,
+                    repo_name,
+                    repo_commit_sha,
+                    repo_commit_msg,
+                    repo_commit_date,
+                )
+                futures[future] = next_file
+
+        submit_more()
+        while futures:
+            for _, future in _drain_completed_futures(futures, max_items=1):
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    print(f"Skipped worker result due to error: {exc}")
+                    submit_more()
+                    continue
+
+                if not result.get("skip"):
+                    merge_processed_file(result)
+                if GC_COLLECT_EVERY and processed_files and processed_files % GC_COLLECT_EVERY == 0:
+                    gc.collect()
+                submit_more()
+
+    flush_document_batch()
+    
+    process_duration = time.time() - process_start_time
+
+    print(f"Loaded {total_documents} chunks total from {repo_path}")
+    print(f"Indexed {len(symbol_resolver.symbol_tables)} files with symbol tables")
+
+    if total_documents == 0:
+        print("No documents to embed; aborting ingestion.")
+        # Cleanup if used ZIP/API
+        if zip_cleanup_root and 'cleanup_zip_extraction' in dir():
+            from .zip_ingestion import cleanup_zip_extraction
+            cleanup_zip_extraction(None, zip_cleanup_root)
         if return_data:
             return {
                 "documents": [],
@@ -425,80 +878,81 @@ def ingest_repo(repo_url_or_path: str, repo_name: str = None, return_data: bool 
             }
         return
 
-    # ========== SECOND PASS: CALL GRAPH ==========
-    # Extract call graphs for ALL supported languages using unified analyzer
-    supported_call_langs = {".py", ".java", ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", 
-                           ".js", ".ts", ".tsx", ".jsx", ".go", ".rs"}
-    
-    for rel_path, ext, content in file_records:
-        try:
-            if ext in supported_call_langs:
-                raw_calls = extract_calls_unified(content, ext)
-            else:
-                raw_calls = []
-
-            for caller_name, callee_symbol in raw_calls:
-                caller_fqn = f"{rel_path}:{caller_name}"
-
-                # Resolve callee symbol to FQN
-                callee_fqn = None
-                candidates = symbol_to_fqn.get(callee_symbol) or []
-                if candidates:
-                    callee_fqn = candidates[0]
-                else:
-                    callee_fqn = callee_symbol
-
-                call_graph.setdefault(caller_fqn, set()).add(callee_fqn)
-        except Exception as e:
-            print(f"⚠️ Call graph extraction failed for {rel_path}: {e}")
+    for rel_path, caller_name, callee_symbol in raw_call_records:
+        caller_fqn = f"{rel_path}:{caller_name}"
+        candidates = symbol_to_fqn.get(callee_symbol) or []
+        callee_fqn = candidates[0] if candidates else callee_symbol
+        call_graph.setdefault(caller_fqn, set()).add(callee_fqn)
 
     symbol_metadata = _build_symbol_metadata(symbol_resolver)
     boot_chain = _build_boot_chain(call_graph, symbol_metadata, repo_name)
 
-    # ========== BUILD KNOWLEDGE GRAPH ==========
-    print(f"\n📚 Building comprehensive knowledge graph...")
-    
+    print("\nBuilding comprehensive knowledge graph...")
     kg_builder.build_from_symbols(symbol_resolver.symbol_tables)
-    print(f"✅ Added symbol nodes to knowledge graph")
-    
+    print("Added symbol nodes to knowledge graph")
+
     call_graph_for_kg = {caller: list(callees) for caller, callees in call_graph.items()}
     kg_builder.build_from_dataflow(dataflow_by_file, call_graph_for_kg)
-    print(f"✅ Added data flow edges to knowledge graph")
+    print("Added data flow edges to knowledge graph")
     kg_builder.add_call_graph(call_graph_for_kg)
-    print(f"✅ Added call graph edges to knowledge graph")
+    print("Added call graph edges to knowledge graph")
     core_structures = _build_core_structures(symbol_resolver, kg_builder, repo_name)
-    
-    print(f"\n📊 Knowledge Graph Statistics:")
+
+    print("\nKnowledge Graph Statistics:")
     print(f"   Nodes: {len(kg_builder.graph.nodes)}")
     print(f"   Edges: {len(kg_builder.graph.edges)}")
-    
-    # Count edges by type
+
     edge_types = {}
     for edge in kg_builder.graph.edges:
         edge_types[edge.edge_type] = edge_types.get(edge.edge_type, 0) + 1
-    
-    print(f"   Edge types:")
+
+    print("   Edge types:")
     for edge_type, count in sorted(edge_types.items()):
         print(f"      {edge_type}: {count}")
 
-    # ========== EXTRACT CONTRIBUTIONS ==========
     contributions_data = {}
-    if extract_contributions:
-        print(f"\n👥 Analyzing code contributions and commit history...")
+    
+    # For GitHub repos: always extract contributions via API (fast, no git needed)
+    if owner and repo and extract_contributions_via_api:
+        print("\nExtracting contributions via GitHub API...")
         try:
-            contributions_data = extract_contributions(repo_path)
-            print(f"✅ Extracted contributions from {contributions_data.get('total_authors', 0)} authors")
-        except Exception as e:
-            print(f"⚠️ Failed to extract contributions: {e}")
+            contributions_data = extract_contributions_via_api(
+                owner, repo, github_token,
+                branch=default_branch,
+            )
+            if contributions_data:
+                save_contributions(repo_name, contributions_data)
+                total_authors = contributions_data.get("total_authors", 0)
+                print(f"Extracted contributions from {total_authors} author(s) via GitHub API")
+            else:
+                print("No contribution data returned from GitHub API")
+        except Exception as exc:
+            print(f"GitHub API contribution extraction failed: {exc}")
+    
+    # Fallback: git-based extraction for local repos (if enabled and no API data yet)
+    if not contributions_data and extract_contributions and analyze_contributions:
+        print("\nAnalyzing code contributions from local git history...")
+        try:
+            contributions_data = extract_contributions(
+                repo_path,
+                max_commits=contribution_commit_limit or None,
+                include_commit_details=CONTRIBUTION_INCLUDE_DETAILS,
+            )
+            print(f"Extracted contributions from {contributions_data.get('total_authors', 0)} authors")
+        except Exception as exc:
+            print(f"Failed to extract contributions: {exc}")
 
-    # ========== BUILD VECTOR STORE ==========
-    embeddings = HuggingFaceEmbeddings(model_name=EMBED_MODEL)
-    vectorstore = FAISS.from_documents(documents, embeddings)
-
-    # Return data if requested, otherwise save to disk
     if return_data:
+        # Cleanup ZIP/API temp files if used
+        if zip_cleanup_root:
+            try:
+                from .zip_ingestion import cleanup_zip_extraction
+                cleanup_zip_extraction(None, zip_cleanup_root)
+            except Exception as e:
+                print(f"Warning: Failed to cleanup temp files: {e}")
+        
         return {
-            "documents": documents,
+            "documents": all_documents or [],
             "call_graph": call_graph,
             "symbol_resolver": symbol_resolver,
             "dataflow_by_file": dataflow_by_file,
@@ -509,131 +963,239 @@ def ingest_repo(repo_url_or_path: str, repo_name: str = None, return_data: bool 
             "boot_chain": boot_chain,
             "core_structures": core_structures,
             "repo_name": repo_name,
+            "ingestion_stats": {
+                "method": ingestion_method,
+                "total_duration": time.time() - overall_start_time,
+                "load_duration": load_duration,
+                "process_duration": process_duration,
+            }
         }
-    
-    # ========== SAVE ALL DATA TO DISK ==========
-    os.makedirs(paths["data_dir"], exist_ok=True)
-    
-    # Save call graph
-    call_graph_serializable = {caller: list(callees) for caller, callees in call_graph.items()}
-    with open(paths["callgraph_path"], "w", encoding="utf-8") as f:
-        json.dump(call_graph_serializable, f, indent=2, ensure_ascii=False)
-    print(f"📡 Saved call graph to `{paths['callgraph_path']}` with {len(call_graph_serializable)} caller nodes.")
 
-    with open(paths["bootchain_path"], "w", encoding="utf-8") as f:
-        json.dump(boot_chain, f, indent=2, ensure_ascii=False)
+    os.makedirs(paths["data_dir"], exist_ok=True)
+
+    call_graph_serializable = {caller: list(callees) for caller, callees in call_graph.items()}
+    with open(paths["callgraph_path"], "w", encoding="utf-8") as handle:
+        json.dump(call_graph_serializable, handle, indent=2, ensure_ascii=False)
+    print(f"Saved call graph to `{paths['callgraph_path']}` with {len(call_graph_serializable)} caller nodes.")
+
+    with open(paths["bootchain_path"], "w", encoding="utf-8") as handle:
+        json.dump(boot_chain, handle, indent=2, ensure_ascii=False)
     print(f"Saved boot chain to `{paths['bootchain_path']}` with {len(boot_chain.get('ordered_steps', []))} ordered step(s).")
 
-    with open(paths["corestructures_path"], "w", encoding="utf-8") as f:
-        json.dump(core_structures, f, indent=2, ensure_ascii=False)
+    with open(paths["corestructures_path"], "w", encoding="utf-8") as handle:
+        json.dump(core_structures, handle, indent=2, ensure_ascii=False)
     print(f"Saved core structures to `{paths['corestructures_path']}` with {len(core_structures.get('structures', []))} ranked structure(s).")
 
-    # Save symbol table data
     symbol_resolver.build_cross_references()
     symbol_table_path = os.path.join(paths["data_dir"], "symbol_table.json")
-    
     symbol_data = {
         "global_index": symbol_resolver.export_cross_reference_graph(),
         "file_symbols": {
             file_path: symbol_table.export_to_dict()
             for file_path, symbol_table in symbol_resolver.symbol_tables.items()
-        }
+        },
     }
-    
-    with open(symbol_table_path, "w", encoding="utf-8") as f:
-        json.dump(symbol_data, f, indent=2, ensure_ascii=False)
-    print(f"🏗️ Saved symbol table to `{symbol_table_path}` with {sum(len(st.all_symbols) for st in symbol_resolver.symbol_tables.values())} total symbols.")
+    with open(symbol_table_path, "w", encoding="utf-8") as handle:
+        json.dump(symbol_data, handle, indent=2, ensure_ascii=False)
+    print(
+        f"Saved symbol table to `{symbol_table_path}` with "
+        f"{sum(len(st.all_symbols) for st in symbol_resolver.symbol_tables.values())} total symbols."
+    )
 
-    # Save data flow analysis
     dataflow_path = os.path.join(paths["data_dir"], "dataflow_analysis.json")
-    
-    with open(dataflow_path, "w", encoding="utf-8") as f:
-        json.dump(dataflow_by_file, f, indent=2, ensure_ascii=False)
-    
+    with open(dataflow_path, "w", encoding="utf-8") as handle:
+        json.dump(dataflow_by_file, handle, indent=2, ensure_ascii=False)
+
     total_functions_analyzed = sum(len(funcs) for funcs in dataflow_by_file.values())
-    print(f"📊 Saved data flow analysis for {total_functions_analyzed} functions to `{dataflow_path}`")
-    
+    print(f"Saved data flow analysis for {total_functions_analyzed} functions to `{dataflow_path}`")
+
     total_def_use_chains = sum(
         len(func_analysis.get("def_use_chains", {}))
         for file_funcs in dataflow_by_file.values()
         for func_analysis in file_funcs.values()
     )
-    print(f"🔗 Tracked {total_def_use_chains} definition-use chains across all functions")
+    print(f"Tracked {total_def_use_chains} definition-use chains across all functions")
 
     async_patterns_path = os.path.join(paths["data_dir"], "async_patterns.json")
-    with open(async_patterns_path, "w", encoding="utf-8") as f:
-        json.dump(async_patterns_by_file, f, indent=2, ensure_ascii=False)
+    with open(async_patterns_path, "w", encoding="utf-8") as handle:
+        json.dump(async_patterns_by_file, handle, indent=2, ensure_ascii=False)
     total_async_patterns = sum(
         entry.get("pattern_count", 0)
         for entry in async_patterns_by_file.values()
         if isinstance(entry, dict)
     )
-    print(f"⏱️ Saved async pattern analysis with {total_async_patterns} pattern(s) to `{async_patterns_path}`")
+    print(f"Saved async pattern analysis with {total_async_patterns} pattern(s) to `{async_patterns_path}`")
 
-    # Export knowledge graph to JSON
     kg_path = os.path.join(paths["data_dir"], "knowledge_graph.json")
     kg_builder.export(kg_path)
 
-    # Save contributions data
     if contributions_data:
         contributions_path = os.path.join(paths["data_dir"], "contributions.json")
-        with open(contributions_path, "w", encoding="utf-8") as f:
-            json.dump(contributions_data, f, indent=2, ensure_ascii=False, default=str)
-        print(f"👥 Saved contributions data to `{contributions_path}`")
+        with open(contributions_path, "w", encoding="utf-8") as handle:
+            json.dump(contributions_data, handle, indent=2, ensure_ascii=False, default=str)
+        print(f"Saved contributions data to `{contributions_path}`")
 
-    # Save vector store
     os.makedirs(paths["vector_dir"], exist_ok=True)
     vectorstore.save_local(paths["vector_dir"])
-    print(f"💾 Saved FAISS vector store to `{paths['vector_dir']}`")
+    print(f"Saved FAISS vector store to `{paths['vector_dir']}`")
+    
+    # ============ PRINT TIMING SUMMARY ============
+    total_duration = time.time() - overall_start_time
+    
+    print("\n" + "=" * 70)
+    print("INGESTION COMPLETE - TIMING SUMMARY")
+    print("=" * 70)
+    print(f"Ingestion Method:     {ingestion_method}")
+    print(f"Repository:           {repo_name}")
+    print(f"Total Files Indexed:  {len(symbol_resolver.symbol_tables)}")
+    print(f"Total Chunks Created: {total_documents}")
+    print()
+    print(f"Timeline:")
+    print(f"  [1] Repository Loading: {_format_duration(load_duration)}")
+    print(f"  [2] File Processing:    {_format_duration(process_duration)}")
+    print(f"  [3] Total Duration:     {_format_duration(total_duration)}")
+    print("=" * 70)
+    
+    # ============ SAVE EVALUATION METRICS ============
+    if save_ingestion_metrics:
+        try:
+            # Calculate total unique nodes in call graph
+            callers = set(call_graph.keys())
+            callees = set()
+            for callee_set in call_graph.values():
+                callees.update(callee_set)
+            total_nodes_cg = len(callers | callees)
+            
+            save_ingestion_metrics(
+                repo_name=repo_name,
+                ingestion_method=ingestion_method,
+                load_duration=load_duration,
+                process_duration=process_duration,
+                total_duration=total_duration,
+                total_files=total_nodes_cg,
+                processed_files=len(symbol_resolver.symbol_tables),
+                total_documents=total_documents,
+                symbol_resolver=symbol_resolver,
+                kg_builder=kg_builder,
+                vectorstore=vectorstore,
+                call_graph=call_graph,
+                embed_model=EMBED_MODEL,
+            )
+        except Exception as e:
+            print(f"[Evaluation] Warning: Failed to save ingestion metrics: {e}")
+    
+    # ============ SAVE CONTRIBUTION METRICS ============
+    if save_contribution_metrics and contributions_data:
+        try:
+            # Aggregate lines and files from all authors
+            total_lines_added = 0
+            total_lines_deleted = 0
+            total_files_changed = 0
+            authors_dict = contributions_data.get("authors", {})
+            
+            for author_data in authors_dict.values():
+                total_lines_added += author_data.get("lines_added", 0)
+                total_lines_deleted += author_data.get("lines_deleted", 0)
+                total_files_changed += author_data.get("files_changed", 0)
+            
+            # Calculate top contributor share
+            total_authors = contributions_data.get("total_authors", 0)
+            max_commits_one_author = 0
+            if authors_dict:
+                max_commits_one_author = max(
+                    author_data.get("commits", 0) for author_data in authors_dict.values()
+                )
+            total_commits = contributions_data.get("total_commits", 0)
+            top_contributor_share = (max_commits_one_author / max(total_commits, 1)) * 100
+            
+            # Get analysis scope flags
+            analysis_scope = contributions_data.get("analysis_scope", {})
+            
+            save_contribution_metrics(
+                repo_name=repo_name,
+                repo_path=repo_path,
+                total_authors=total_authors,
+                total_commits=total_commits,
+                total_lines_added=total_lines_added,
+                total_lines_deleted=total_lines_deleted,
+                total_files_changed=total_files_changed,
+                top_contributor_share_pct=top_contributor_share,
+                commit_sample_size=analysis_scope.get("commit_sample_size", analysis_scope.get("processed_commits", 0)),
+                detail_commit_sample_size=analysis_scope.get("detail_commit_sample_size", 0),
+                fallback_mode=analysis_scope.get("fallback_mode", False),
+                timed_out=analysis_scope.get("timed_out", False),
+                has_line_stats=total_lines_added > 0 or total_lines_deleted > 0,
+                has_file_stats=total_files_changed > 0,
+            )
+        except Exception as e:
+            print(f"[Evaluation] Warning: Failed to save contribution metrics: {e}")
+    
+    # ============ SAVE GRAPH METRICS ============
+    if save_graph_metrics:
+        try:
+            save_graph_metrics(
+                repo_name=repo_name,
+                call_graph=call_graph,
+                kg_builder=kg_builder,
+                symbol_resolver=symbol_resolver,
+            )
+        except Exception as e:
+            print(f"[Evaluation] Warning: Failed to save graph metrics: {e}")
+    
+    
+    # Cleanup temporary files if API/ZIP ingestion was used
+    if zip_cleanup_root and os.path.exists(zip_cleanup_root):
+        try:
+            import shutil
+            shutil.rmtree(zip_cleanup_root, ignore_errors=True)
+        except Exception as e:
+            print(f"Warning: Failed to cleanup temp files: {e}")
 
 
-# ===============================
-# MULTI-REPO INGESTION
-# ===============================
-def ingest_repos(repo_list: list, aggregate: bool = True):
-    """
-    Ingest multiple repositories and optionally aggregate the results.
-    
-    Args:
-        repo_list: List of tuples (repo_url_or_path, repo_name) or just repo URLs/paths
-        aggregate: If True, merge all data into unified stores. If False, keep separate.
-    
-    Returns:
-        Dict with aggregated data if aggregate=True, otherwise list of per-repo data
-    """
+def ingest_repos(
+    repo_list: list,
+    aggregate: bool = True,
+    analyze_contributions: Optional[bool] = None,
+    contribution_commit_limit: Optional[int] = None,
+    verbose: bool = False,
+):
+    """Ingest multiple repositories and optionally aggregate the results."""
     all_documents = []
     all_call_graphs = {}
     all_symbol_resolvers = []
     all_dataflow = {}
     all_kg_builders = []
-    all_vectorstores = []
     all_contributions = {}
     all_boot_chains = {}
     all_core_structures = {}
     all_async_patterns = {}
     repo_names = []
-    
-    # Process each repository
-    for i, repo_item in enumerate(repo_list):
+
+    for index, repo_item in enumerate(repo_list):
         if isinstance(repo_item, tuple):
             repo_url_or_path, repo_name = repo_item
         else:
             repo_url_or_path = repo_item
             repo_name = None
-        
-        print(f"\n{'='*60}")
-        print(f"📦 Processing repository {i+1}/{len(repo_list)}: {repo_url_or_path}")
-        print(f"{'='*60}\n")
-        
-        result = ingest_repo(repo_url_or_path, repo_name=repo_name, return_data=True)
-        
+
+        print(f"\n{'=' * 60}")
+        print(f"Processing repository {index + 1}/{len(repo_list)}: {repo_url_or_path}")
+        print(f"{'=' * 60}\n")
+
+        result = ingest_repo(
+            repo_url_or_path,
+            repo_name=repo_name,
+            return_data=True,
+            analyze_contributions=analyze_contributions,
+            contribution_commit_limit=contribution_commit_limit,
+            verbose=verbose,
+        )
         if result:
             all_documents.extend(result["documents"])
             all_call_graphs.update(result["call_graph"])
             all_symbol_resolvers.append(result["symbol_resolver"])
             all_dataflow.update(result["dataflow_by_file"])
             all_kg_builders.append(result["kg_builder"])
-            all_vectorstores.append(result["vectorstore"])
             if result.get("contributions"):
                 all_contributions[result["repo_name"]] = result["contributions"]
             if result.get("boot_chain"):
@@ -643,64 +1205,55 @@ def ingest_repos(repo_list: list, aggregate: bool = True):
             if result.get("async_patterns_by_file"):
                 all_async_patterns[result["repo_name"]] = result["async_patterns_by_file"]
             repo_names.append(result["repo_name"])
-    
+
     if not aggregate:
-        print("\n✅ All repositories processed separately.")
+        print("\nAll repositories processed separately.")
         return {
             "repos": repo_names,
             "per_repo_data": [
                 {
                     "repo_name": name,
-                    "documents_count": len([d for d in all_documents if d.metadata.get("repo_name") == name]),
+                    "documents_count": len([doc for doc in all_documents if doc.metadata.get("repo_name") == name]),
                 }
                 for name in repo_names
-            ]
+            ],
         }
-    
-    # Aggregate data
-    print(f"\n{'='*60}")
-    print(f"🔄 Aggregating data from {len(repo_list)} repositories...")
-    print(f"{'='*60}\n")
-    
-    # Merge symbol resolvers
+
+    print(f"\n{'=' * 60}")
+    print(f"Aggregating data from {len(repo_list)} repositories...")
+    print(f"{'=' * 60}\n")
+
     aggregated_symbol_resolver = SymbolResolver()
-    for sr in all_symbol_resolvers:
-        for file_path, symbol_table in sr.symbol_tables.items():
+    for resolver in all_symbol_resolvers:
+        for file_path, symbol_table in resolver.symbol_tables.items():
             aggregated_symbol_resolver.add_symbol_table(file_path, symbol_table)
     aggregated_symbol_resolver.build_cross_references()
-    
-    # Merge knowledge graphs
+
     aggregated_kg = KnowledgeGraphBuilder()
     for kg_builder in all_kg_builders:
-        # Add all nodes and edges from each knowledge graph
         for node in kg_builder.graph.nodes.values():
             aggregated_kg.graph.add_node(node)
         for edge in kg_builder.graph.edges:
             aggregated_kg.graph.add_edge(edge)
-    
-    # Merge vector stores
-    print("💾 Merging vector stores...")
+
+    print("Merging vector stores...")
     embeddings = HuggingFaceEmbeddings(model_name=EMBED_MODEL)
-    # Create a new vectorstore from all documents (FAISS doesn't have merge_from)
     merged_vectorstore = FAISS.from_documents(all_documents, embeddings)
-    
-    # Save aggregated data
-    aggregated_paths = _get_repo_paths(None)  # Use default paths for aggregated data
+
+    aggregated_paths = _get_repo_paths(None)
     os.makedirs(aggregated_paths["data_dir"], exist_ok=True)
-    
-    # Save aggregated call graph
-    with open(aggregated_paths["callgraph_path"], "w", encoding="utf-8") as f:
-        json.dump({caller: list(callees) for caller, callees in all_call_graphs.items()}, 
-                 f, indent=2, ensure_ascii=False)
-    print(f"📡 Saved aggregated call graph with {len(all_call_graphs)} caller nodes.")
-    
+
+    with open(aggregated_paths["callgraph_path"], "w", encoding="utf-8") as handle:
+        json.dump({caller: list(callees) for caller, callees in all_call_graphs.items()}, handle, indent=2, ensure_ascii=False)
+    print(f"Saved aggregated call graph with {len(all_call_graphs)} caller nodes.")
+
     aggregated_boot_chain = {
         "repo_name": "aggregated",
         "repositories": all_boot_chains,
         "summary": f"Boot chain data preserved for {len(all_boot_chains)} repository/repositories.",
     }
-    with open(aggregated_paths["bootchain_path"], "w", encoding="utf-8") as f:
-        json.dump(aggregated_boot_chain, f, indent=2, ensure_ascii=False)
+    with open(aggregated_paths["bootchain_path"], "w", encoding="utf-8") as handle:
+        json.dump(aggregated_boot_chain, handle, indent=2, ensure_ascii=False)
     print(f"Saved aggregated boot chain metadata for {len(all_boot_chains)} repositories.")
 
     aggregated_core_structures = {
@@ -708,47 +1261,49 @@ def ingest_repos(repo_list: list, aggregate: bool = True):
         "repositories": all_core_structures,
         "summary": f"Core structure data preserved for {len(all_core_structures)} repository/repositories.",
     }
-    with open(aggregated_paths["corestructures_path"], "w", encoding="utf-8") as f:
-        json.dump(aggregated_core_structures, f, indent=2, ensure_ascii=False)
+    with open(aggregated_paths["corestructures_path"], "w", encoding="utf-8") as handle:
+        json.dump(aggregated_core_structures, handle, indent=2, ensure_ascii=False)
     print(f"Saved aggregated core-structure metadata for {len(all_core_structures)} repositories.")
 
-    # Save aggregated symbol table
     symbol_table_path = os.path.join(aggregated_paths["data_dir"], "symbol_table.json")
     symbol_data = {
         "global_index": aggregated_symbol_resolver.export_cross_reference_graph(),
         "file_symbols": {
             file_path: symbol_table.export_to_dict()
             for file_path, symbol_table in aggregated_symbol_resolver.symbol_tables.items()
-        }
+        },
     }
-    with open(symbol_table_path, "w", encoding="utf-8") as f:
-        json.dump(symbol_data, f, indent=2, ensure_ascii=False)
-    print(f"🏗️ Saved aggregated symbol table with {sum(len(st.all_symbols) for st in aggregated_symbol_resolver.symbol_tables.values())} total symbols.")
-    
-    # Save aggregated dataflow
+    with open(symbol_table_path, "w", encoding="utf-8") as handle:
+        json.dump(symbol_data, handle, indent=2, ensure_ascii=False)
+    print(
+        f"Saved aggregated symbol table with "
+        f"{sum(len(st.all_symbols) for st in aggregated_symbol_resolver.symbol_tables.values())} total symbols."
+    )
+
     dataflow_path = os.path.join(aggregated_paths["data_dir"], "dataflow_analysis.json")
-    with open(dataflow_path, "w", encoding="utf-8") as f:
-        json.dump(all_dataflow, f, indent=2, ensure_ascii=False)
-    print(f"📊 Saved aggregated data flow analysis.")
+    with open(dataflow_path, "w", encoding="utf-8") as handle:
+        json.dump(all_dataflow, handle, indent=2, ensure_ascii=False)
+    print("Saved aggregated data flow analysis.")
 
     async_patterns_path = os.path.join(aggregated_paths["data_dir"], "async_patterns.json")
-    with open(async_patterns_path, "w", encoding="utf-8") as f:
-        json.dump(all_async_patterns, f, indent=2, ensure_ascii=False)
-    print(f"⏱️ Saved aggregated async pattern analysis.")
-    
-    # Save aggregated knowledge graph
+    with open(async_patterns_path, "w", encoding="utf-8") as handle:
+        json.dump(all_async_patterns, handle, indent=2, ensure_ascii=False)
+    print("Saved aggregated async pattern analysis.")
+
     kg_path = os.path.join(aggregated_paths["data_dir"], "knowledge_graph.json")
     aggregated_kg.export(kg_path)
-    print(f"📚 Saved aggregated knowledge graph with {len(aggregated_kg.graph.nodes)} nodes and {len(aggregated_kg.graph.edges)} edges.")
-    
-    # Save aggregated contributions
+    print(f"Saved aggregated knowledge graph with {len(aggregated_kg.graph.nodes)} nodes and {len(aggregated_kg.graph.edges)} edges.")
+
     if all_contributions:
         contributions_path = os.path.join(aggregated_paths["data_dir"], "contributions.json")
-        with open(contributions_path, "w", encoding="utf-8") as f:
-            json.dump(all_contributions, f, indent=2, ensure_ascii=False, default=str)
-        print(f"👥 Saved aggregated contributions data from {len(all_contributions)} repositories.")
+        with open(contributions_path, "w", encoding="utf-8") as handle:
+            json.dump(all_contributions, handle, indent=2, ensure_ascii=False, default=str)
+        print(f"Saved aggregated contributions data from {len(all_contributions)} repositories.")
 
-    print(f"\n✅ Successfully aggregated {len(repo_list)} repositories!")
+    os.makedirs(aggregated_paths["vector_dir"], exist_ok=True)
+    merged_vectorstore.save_local(aggregated_paths["vector_dir"])
+
+    print(f"\nSuccessfully aggregated {len(repo_list)} repositories.")
     return {
         "repos": repo_names,
         "total_documents": len(all_documents),
@@ -759,20 +1314,14 @@ def ingest_repos(repo_list: list, aggregate: bool = True):
     }
 
 
-# ===============================
-# CLI
-# ===============================
 if __name__ == "__main__":
     import sys
-    
-    if len(sys.argv) > 1:
-        # Multiple repos provided as arguments
-        repos = sys.argv[1:]
-        print(f"📦 Processing {len(repos)} repositories...")
-        result = ingest_repos(repos, aggregate=True)
-        print(f"\n✅ Completed! Processed {len(repos)} repositories.")
-    else:
-        # Single repo interactive mode
-        repo_url = input("🔗 Enter GitHub repo URL or local path: ").strip()
-        ingest_repo(repo_url)
 
+    if len(sys.argv) > 1:
+        repos = sys.argv[1:]
+        print(f"Processing {len(repos)} repositories...")
+        ingest_repos(repos, aggregate=True)
+        print(f"\nCompleted! Processed {len(repos)} repositories.")
+    else:
+        repo_url = input("Enter GitHub repo URL or local path: ").strip()
+        ingest_repo(repo_url)

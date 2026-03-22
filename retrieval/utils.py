@@ -87,7 +87,10 @@ def breadcrumb_for_path(path: str) -> str:
 def load_file_segment(meta: dict, repo_path: str, padding: int = 20):
     """Load surrounding code context for a chunk."""
     try:
-        file_path = os.path.join(repo_path, meta["path"])
+        raw_path = meta.get("path", "")
+        # Strip repo_name: prefix if present (e.g. "myrepo:src/app.py" -> "src/app.py")
+        rel_path = raw_path.split(":", 1)[1] if ":" in raw_path else raw_path
+        file_path = os.path.join(repo_path, rel_path)
         if not os.path.exists(file_path):
             return None
         start, end = meta.get("start_line", 1), meta.get("end_line", 1)

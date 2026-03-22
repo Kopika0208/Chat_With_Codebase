@@ -25,6 +25,25 @@ def list_ingested_repos():
         if os.path.isdir(os.path.join(DATA_DIR, d))
     )
 
+
+def _get_repo_source_path(repo_name: str) -> str:
+    """Resolve the best available path to source files for a repo.
+    
+    Tries in order:
+    1. repos/<repo_name>/ (git clone)
+    2. data/<repo_name>/api_source/ (API ingestion snapshot)
+    3. data/<repo_name>/ (fallback)
+    """
+    git_path = os.path.join(PROJECT_ROOT, "repos", repo_name)
+    if os.path.isdir(git_path):
+        return git_path
+    
+    api_source = os.path.join(DATA_DIR, repo_name, "api_source")
+    if os.path.isdir(api_source):
+        return api_source
+    
+    return os.path.join(DATA_DIR, repo_name)
+
 import traceback
 import streamlit as st
 from dotenv import load_dotenv
@@ -81,6 +100,14 @@ from onboarding import (
 from code_health.visualization import render_code_health_tab
 from contributions_viz import render_contributions_tab
 from contributions_analyzer import load_contributions_analyzer, ContributionsDataAnalyzer
+
+# ===============================
+# Evaluation metrics collection
+# ===============================
+try:
+    from evaluation.collector import save_retrieval_metrics
+except ImportError:
+    save_retrieval_metrics = None
 
 # ===============================
 # ⚙️ SETUP
@@ -1004,7 +1031,7 @@ def run_query_pipeline(query: str, repo_name: str, enable_query_rewrite: bool, e
     # Check if reasoning chain should be used
     if enable_reasoning_chain:
         try:
-            reasoning_chain = get_reasoning_chain()
+            reasoning_chain = get_reasoning_chain(active_repo)
             if reasoning_chain:
                 result = reasoning_chain.reason(query, enable_graph_walk=True)
                 return {
@@ -1059,7 +1086,7 @@ def run_query_pipeline(query: str, repo_name: str, enable_query_rewrite: bool, e
         # 5️⃣ Build context and answer
         expanded_map = get_expanded_context(
             final_docs,
-            repo_path=os.path.join("repos", repo_name)
+            repo_path=_get_repo_source_path(repo_name)
         )
         context_str, sources_str = build_context_and_sources(final_docs, expanded_map)
 
@@ -1265,6 +1292,9 @@ def _run_contribution_query(query: str, repo_name: str, contrib_analyzer: Contri
 
 if run_query and query:
     with st.spinner("🔎 Processing your query..."):
+        import time
+        query_start_time = time.time()
+        
         result = run_graph_rag_pipeline(
             query=query,
             repo_name=active_repo,
@@ -1272,6 +1302,8 @@ if run_query and query:
             max_depth=graph_max_depth,
             strategy=graph_strategy
         )
+        
+        query_latency = time.time() - query_start_time
         
         if result:
             st.session_state["last_answer"] = result["answer"]
@@ -1289,6 +1321,95 @@ if run_query and query:
                 st.session_state["graph_rag_result"] = result["graph_rag_result"]
                 st.session_state["anchor_nodes"] = result["anchor_nodes"]
                 st.session_state["total_nodes_visited"] = result["total_nodes_visited"]
+            
+            # ============ SAVE RETRIEVAL METRICS ============
+            if save_retrieval_metrics:
+                try:
+                    # Extract metrics from result
+                    final_docs = result.get("final_docs", [])
+                    answer = result.get("answer", "")
+                    intent_type = result.get("query_understanding", {}).get("intent", "unknown")
+                    
+                    # Method detection
+                    method = "graph_rag"
+                    if result.get("is_contribution_query"):
+                        method = "contribution_analysis"
+                    elif result.get("boot_chain_used"):
+                        method = "boot_chain"
+                    elif result.get("dataflow_trace_used"):
+                        method = "dataflow_trace"
+                    
+                    # Graph expansion metrics - ensure numeric types
+                    anchor_nodes_raw = result.get("anchor_nodes", 0)
+                    total_visited_raw = result.get("total_nodes_visited", 0)
+                    
+                    # Convert to int if they're sets or other types
+                    anchor_nodes = len(anchor_nodes_raw) if isinstance(anchor_nodes_raw, (set, list)) else int(anchor_nodes_raw or 0)
+                    total_visited = len(total_visited_raw) if isinstance(total_visited_raw, (set, list)) else int(total_visited_raw or 0)
+                    
+                    graph_rag_result = result.get("graph_rag_result", {})
+                    max_depth = graph_rag_result.get("max_depth_reached", 0) if isinstance(graph_rag_result, dict) else 0
+                    edges_traversed = graph_rag_result.get("edges_traversed", 0) if isinstance(graph_rag_result, dict) else 0
+                    
+                    # Ensure numeric types
+                    max_depth = int(max_depth or 0)
+                    edges_traversed = int(edges_traversed or 0)
+                    
+                    # Diversity metrics
+                    unique_files = set()
+                    unique_symbols = set()
+                    unique_languages = set()
+                    for doc in final_docs:
+                        if hasattr(doc, 'metadata'):
+                            metadata = doc.metadata
+                        else:
+                            metadata = doc if isinstance(doc, dict) else {}
+                        
+                        file_path = metadata.get("file_path", "")
+                        if ":" in file_path:
+                            file_path = file_path.split(":", 1)[1]
+                        unique_files.add(file_path)
+                        
+                        symbol = metadata.get("symbol", "")
+                        if symbol:
+                            unique_symbols.add(symbol)
+                        
+                        lang = metadata.get("language", "")
+                        if lang:
+                            unique_languages.add(lang)
+                    
+                    # Answer metrics
+                    answer_length_chars = len(answer)
+                    answer_length_words = len(answer.split())
+                    
+                    files_cited = len(unique_files)
+                    symbols_cited = len(unique_symbols)
+                    has_code_blocks = "```" in answer
+                    
+                    save_retrieval_metrics(
+                        repo_name=active_repo,
+                        query=query,
+                        method=method,
+                        latency_seconds=query_latency,
+                        docs_returned=len(final_docs),
+                        answer=answer,
+                        intent_type=intent_type,
+                        is_startup=result.get("query_understanding", {}).get("is_startup_query", False),
+                        anchor_nodes=anchor_nodes,
+                        total_visited=total_visited,
+                        max_depth=max_depth,
+                        edges_traversed=edges_traversed,
+                        unique_files=len(unique_files),
+                        unique_symbols=len(unique_symbols),
+                        unique_languages=list(unique_languages),
+                        answer_length_chars=answer_length_chars,
+                        answer_length_words=answer_length_words,
+                        files_cited=files_cited,
+                        symbols_cited=symbols_cited,
+                        has_code_blocks=has_code_blocks,
+                    )
+                except Exception as e:
+                    print(f"[Evaluation] Warning: Failed to save retrieval metrics: {e}")
 
 
 # ======================================================
@@ -1397,7 +1518,7 @@ if "last_answer" in st.session_state and "last_docs" in st.session_state:
         with st.expander("👁 View surrounding code"):
             seg = load_file_segment(
                 m,
-                repo_path=os.path.join("repos", active_repo),
+                repo_path=_get_repo_source_path(active_repo),
                 padding=20
             )
             if seg is not None:
@@ -1406,5 +1527,3 @@ if "last_answer" in st.session_state and "last_docs" in st.session_state:
                 st.code(segment_text, language=m.get("language") or "python")
             else:
                 st.info("Unable to load surrounding file segment.")
-
-

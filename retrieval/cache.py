@@ -178,7 +178,7 @@ def get_vectorstore(repo_name: str):
 # ======================================================
 @st.cache_resource(show_spinner=False)
 def get_llm():
-    return ChatGroq(model="llama-3.1-8b-instant", temperature=0)
+    return ChatGroq(model="moonshotai/kimi-k2-instruct-0905", temperature=0)
 
 
 # ======================================================

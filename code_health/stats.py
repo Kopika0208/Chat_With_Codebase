@@ -92,27 +92,196 @@ class CodeStatistics:
             '.rs': 'rust',
         }
         
-        for root, dirs, files in os.walk(self.repo_path):
-            # Skip common non-essential directories
-            dirs[:] = [d for d in dirs if d not in [
-                '__pycache__', '.git', '.venv', 'venv', 'node_modules', '.pytest_cache',
-                'target', 'build', 'dist', '.gradle', '.idea', 'vendor'
-            ]]
-            
-            for file in files:
-                file_ext = os.path.splitext(file)[1]
-                if file_ext in supported_extensions:
-                    file_path = os.path.join(root, file)
-                    language = supported_extensions[file_ext]
-                    try:
-                        stats = self._analyze_file(file_path, language)
-                        # Use relative path as key
-                        rel_path = os.path.relpath(file_path, self.repo_path)
-                        file_stats[rel_path] = stats
-                    except Exception as e:
-                        print(f"⚠️ Error analyzing {file_path}: {e}")
+        # Try to walk source files on disk
+        if self.repo_path and os.path.isdir(self.repo_path):
+            for root, dirs, files in os.walk(self.repo_path):
+                # Skip common non-essential directories
+                dirs[:] = [d for d in dirs if d not in [
+                    '__pycache__', '.git', '.venv', 'venv', 'node_modules', '.pytest_cache',
+                    'target', 'build', 'dist', '.gradle', '.idea', 'vendor'
+                ]]
+                
+                for file in files:
+                    file_ext = os.path.splitext(file)[1]
+                    if file_ext in supported_extensions:
+                        file_path = os.path.join(root, file)
+                        language = supported_extensions[file_ext]
+                        try:
+                            stats = self._analyze_file(file_path, language)
+                            # Use relative path as key
+                            rel_path = os.path.relpath(file_path, self.repo_path)
+                            file_stats[rel_path] = stats
+                        except Exception as e:
+                            print(f"⚠️ Error analyzing {file_path}: {e}")
+        
+        # Fallback: derive stats from symbol_table when source files aren't available
+        if not file_stats:
+            file_stats = self._compute_file_statistics_from_symbol_table(supported_extensions)
         
         return file_stats
+    
+    def _compute_file_statistics_from_symbol_table(self, supported_extensions: Dict) -> Dict:
+        """Derive file statistics from the symbol_table when source files aren't on disk."""
+        file_stats = {}
+        
+        # The ingestion system stores symbol data in file_symbols: {file_key: {symbols: {...}}}
+        file_symbols = self.symbol_table.get('file_symbols', {})
+        
+        if not file_symbols:
+            # Try global_index -> files list as a last resort for file enumeration
+            global_index = self.symbol_table.get('global_index', {})
+            if isinstance(global_index, dict):
+                file_list = global_index.get('files', [])
+                if file_list:
+                    # We know about files but have no symbol detail — create minimal entries
+                    for file_key in file_list:
+                        clean_path = file_key.split(':', 1)[1] if ':' in file_key else file_key
+                        ext = os.path.splitext(clean_path)[1].lower()
+                        language = supported_extensions.get(ext, 'unknown')
+                        if ext not in supported_extensions:
+                            continue
+                        file_stats[clean_path] = self._empty_file_stats(clean_path, language)
+            return file_stats
+        
+        for file_key, file_data in file_symbols.items():
+            if not isinstance(file_data, dict):
+                continue
+            
+            # Strip repo_name: prefix to get the relative path
+            clean_path = file_key
+            if ':' in clean_path:
+                clean_path = clean_path.split(':', 1)[1]
+            
+            ext = os.path.splitext(clean_path)[1].lower()
+            language = supported_extensions.get(ext)
+            if not language:
+                continue
+            
+            symbols = file_data.get('symbols', {})
+            
+            num_functions = 0
+            num_classes = 0
+            max_line = 0
+            function_lengths = []
+            
+            for fqn, sym_data in symbols.items():
+                if not isinstance(sym_data, dict):
+                    continue
+                kind = sym_data.get('kind', '')
+                line = int(sym_data.get('line', 0))
+                end_line = int(sym_data.get('end_line', line))
+                max_line = max(max_line, end_line)
+                
+                if kind in ('function', 'method'):
+                    num_functions += 1
+                    func_length = max(1, end_line - line + 1)
+                    function_lengths.append(func_length)
+                elif kind == 'class':
+                    num_classes += 1
+            
+            estimated_loc = max(max_line, 1)
+            avg_func_length = (
+                sum(function_lengths) / len(function_lengths) if function_lengths else 0
+            )
+            # Rough complexity estimate: 1 base + ~1 per function + bonus for long functions
+            estimated_complexity = 1 + num_functions + sum(
+                max(0, fl - 10) // 5 for fl in function_lengths
+            )
+            
+            # Estimate code vs comment split (heuristic)
+            loc_code = int(estimated_loc * 0.78)
+            loc_comment = int(estimated_loc * 0.10)
+            loc_blank = int(estimated_loc * 0.12)
+            
+            # Fan-in/fan-out from call graph
+            fan_in = self._compute_fan_in_from_call_graph(file_key, clean_path)
+            fan_out = self._compute_fan_out_from_call_graph(file_key, clean_path)
+            
+            # Count imports from scopes
+            num_imports = 0
+            for scope_data in file_data.get('scopes', {}).values():
+                if isinstance(scope_data, dict):
+                    num_imports += len(scope_data.get('imports', {}))
+            
+            # Docstring coverage: check if symbols have docstrings
+            documented = sum(
+                1 for s in symbols.values()
+                if isinstance(s, dict) and s.get('kind') in ('function', 'method') and s.get('docstring')
+            )
+            docstring_coverage = (documented / max(num_functions, 1)) * 100 if num_functions > 0 else 0
+            
+            file_stats[clean_path] = {
+                'path': clean_path,
+                'language': language,
+                'loc': estimated_loc,
+                'loc_code': loc_code,
+                'loc_blank': loc_blank,
+                'loc_comment': loc_comment,
+                'num_functions': num_functions,
+                'num_classes': num_classes,
+                'num_imports': num_imports,
+                'cyclomatic_complexity': estimated_complexity,
+                'average_function_length': avg_func_length,
+                'has_docstring': any(
+                    isinstance(s, dict) and s.get('docstring')
+                    for s in symbols.values()
+                ),
+                'docstring_coverage': docstring_coverage,
+                'fan_in': fan_in,
+                'fan_out': fan_out,
+                'dependency_count': num_imports,
+                'comment_to_code_ratio': loc_comment / max(loc_code, 1),
+            }
+        
+        if file_stats:
+            print(f"[Code Health] Derived statistics for {len(file_stats)} files from symbol table data")
+        
+        return file_stats
+    
+    def _empty_file_stats(self, path: str, language: str) -> Dict:
+        """Return a minimal file stats entry with zeroes."""
+        return {
+            'path': path, 'language': language,
+            'loc': 1, 'loc_code': 1, 'loc_blank': 0, 'loc_comment': 0,
+            'num_functions': 0, 'num_classes': 0, 'num_imports': 0,
+            'cyclomatic_complexity': 1, 'average_function_length': 0,
+            'has_docstring': False, 'docstring_coverage': 0,
+            'fan_in': 0, 'fan_out': 0, 'dependency_count': 0,
+            'comment_to_code_ratio': 0,
+        }
+    
+    def _compute_fan_in_from_call_graph(self, file_key: str, clean_path: str) -> int:
+        """Compute fan-in from call graph: how many other files call into this file."""
+        if not self.call_graph:
+            return 0
+        fan_in = 0
+        for caller, callees in self.call_graph.items():
+            caller_file = caller.split(':')[0] if ':' in caller else ''
+            if caller_file == file_key or caller_file == clean_path:
+                continue
+            callees_list = list(callees) if isinstance(callees, (set, list)) else [callees]
+            for callee in callees_list:
+                callee_file = callee.split(':')[0] if ':' in callee else ''
+                if callee_file == file_key or callee_file == clean_path:
+                    fan_in += 1
+                    break  # Count each caller file once
+        return fan_in
+    
+    def _compute_fan_out_from_call_graph(self, file_key: str, clean_path: str) -> int:
+        """Compute fan-out from call graph: how many other files this file calls."""
+        if not self.call_graph:
+            return 0
+        target_files = set()
+        for caller, callees in self.call_graph.items():
+            caller_file = caller.split(':')[0] if ':' in caller else ''
+            if caller_file != file_key and caller_file != clean_path:
+                continue
+            callees_list = list(callees) if isinstance(callees, (set, list)) else [callees]
+            for callee in callees_list:
+                callee_file = callee.split(':')[0] if ':' in callee else ''
+                if callee_file and callee_file != file_key and callee_file != clean_path:
+                    target_files.add(callee_file)
+        return len(target_files)
     
     def _analyze_file(self, file_path: str, language: str) -> Dict:
         """Analyze a single source file (multi-language support)."""

@@ -220,7 +220,10 @@ def get_expanded_context(
         meta = doc.metadata or {}
         expanded_context = ""
         try:
-            file_path = os.path.join(repo_path, meta["path"])
+            raw_path = meta.get("path", "")
+            # Strip repo_name: prefix if present (e.g. "myrepo:src/app.py" -> "src/app.py")
+            rel_path = raw_path.split(":", 1)[1] if ":" in raw_path else raw_path
+            file_path = os.path.join(repo_path, rel_path)
             if not os.path.exists(file_path):
                 expanded_map[id(doc)] = ""
                 continue
