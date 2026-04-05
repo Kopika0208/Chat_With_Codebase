@@ -177,18 +177,23 @@ class _RateLimitedEmbeddings:
 
     Free-tier constraints:
       - 3 RPM  → minimum 20s between API calls
-      - 10K TPM → ~3,333 tokens per call at 3 RPM; batch_size=16 keeps each call
-                  under that budget (~16 chunks × ~200 tokens ≈ 3,200 tokens/call)
+      - 10K TPM → ~3,333 tokens per call at 3 RPM; sub_batch_size=16 keeps each
+                  API call under that budget (~16 chunks × ~200 tokens ≈ 3,200 tokens)
+
+    Handles sub-batching internally so every individual API request is throttled —
+    not just the outer embed_documents() call. This prevents VoyageAIEmbeddings from
+    firing multiple rapid sub-batch calls that blow past the RPM limit.
 
     Retries up to 3 times with exponential backoff on rate-limit errors.
     """
 
-    def __init__(self, embeddings, rpm: int = 3, max_retries: int = 3):
+    def __init__(self, embeddings, rpm: int = 3, max_retries: int = 3, sub_batch_size: int = 16):
         self._embeddings = embeddings
         self._interval = 60.0 / rpm  # 20 s between API calls
         self._lock = _threading.Lock()
         self._last_called = 0.0
         self._max_retries = max_retries
+        self._sub_batch_size = sub_batch_size
 
     def _throttle(self):
         with self._lock:
@@ -214,7 +219,14 @@ class _RateLimitedEmbeddings:
                     raise
 
     def embed_documents(self, texts):
-        return self._call_with_retry(self._embeddings.embed_documents, texts)
+        # Sub-batch manually so every individual API request goes through _throttle(),
+        # preventing VoyageAIEmbeddings internal batching from firing multiple rapid calls.
+        all_embeddings = []
+        for i in range(0, len(texts), self._sub_batch_size):
+            batch = texts[i:i + self._sub_batch_size]
+            result = self._call_with_retry(self._embeddings.embed_documents, batch)
+            all_embeddings.extend(result)
+        return all_embeddings
 
     def embed_query(self, text):
         return self._call_with_retry(self._embeddings.embed_query, text)
