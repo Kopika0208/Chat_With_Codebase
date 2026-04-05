@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 
-const API_BASE = "/api";
+const API_BASE = "https://chatwithcodebase-production.up.railway.app";
 const NAV_ITEMS = ["Dashboard", "Query", "Call Graph", "Onboarding"];
 const ONBOARDING_TABS = ["Overview", "Entry/Exit Points", "Roadmap", "File Structure", "Navigation", "Code Health", "Contributions"];
 
