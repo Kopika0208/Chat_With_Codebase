@@ -11,7 +11,7 @@ import traceback
 import streamlit as st
 from langchain_groq import ChatGroq
 from langchain_community.vectorstores import FAISS
-from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_voyageai import VoyageAIEmbeddings
 
 from redis_storage import get_json, repo_exists
 
@@ -29,7 +29,7 @@ except ImportError:
 # ======================================================
 # 🔧 CONFIG
 # ======================================================
-EMBED_MODEL = "mixedbread-ai/mxbai-embed-large-v1"
+EMBED_MODEL = "voyage-code-3"
 
 # Data directory is at project root, not inside retrieval/
 DATA_DIR = os.path.join(
@@ -148,7 +148,7 @@ def load_async_patterns_cached(repo_name: str):
 
 @st.cache_resource(show_spinner=False)
 def get_embeddings():
-    return HuggingFaceEmbeddings(model_name=EMBED_MODEL)
+    return VoyageAIEmbeddings(model=EMBED_MODEL, voyage_api_key=os.getenv("VOYAGE_AI_API_KEY"), batch_size=128)
 
 
 @st.cache_resource(show_spinner=False)
