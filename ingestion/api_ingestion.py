@@ -41,11 +41,11 @@ from .utils import GENERATED_MARKERS, MAX_FILE_BYTES, SKIP_DIR_NAMES, SKIP_FILE_
 try:
     from langchain_community.vectorstores import FAISS
     from langchain_core.documents import Document
-    from langchain_huggingface import HuggingFaceEmbeddings
+    from langchain_voyageai import VoyageAIEmbeddings
 except ImportError:
     FAISS = None
     Document = None
-    HuggingFaceEmbeddings = None
+    VoyageAIEmbeddings = None
 
 
 REPO_INDEX_METADATA = "repo_index_metadata.json"
@@ -389,10 +389,10 @@ def _materialize_outputs(
         nonlocal embeddings, pending_documents, total_documents, vectorstore
         if not pending_documents:
             return
-        if HuggingFaceEmbeddings is None or FAISS is None:
+        if VoyageAIEmbeddings is None or FAISS is None:
             raise RuntimeError("Embedding dependencies are not installed.")
         if embeddings is None:
-            embeddings = HuggingFaceEmbeddings(model_name=EMBED_MODEL)
+            embeddings = VoyageAIEmbeddings(model=EMBED_MODEL, voyage_api_key=os.getenv("VOYAGE_AI_API_KEY"), batch_size=128)
 
         batch = pending_documents
         pending_documents = []
