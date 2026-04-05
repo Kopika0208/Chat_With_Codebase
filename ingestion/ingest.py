@@ -5,7 +5,6 @@ import ast
 import json
 import os
 import tempfile
-import time
 from datetime import datetime
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import Any, Dict, List, Optional
@@ -68,10 +67,10 @@ except ImportError:
     extract_calls_unified = None
 
 try:
-    from langchain_voyageai import VoyageAIEmbeddings
+    from langchain_community.embeddings import JinaEmbeddings
     from langchain_community.vectorstores import FAISS
 except ImportError:
-    VoyageAIEmbeddings = None
+    JinaEmbeddings = None
     FAISS = None
 
 try:
@@ -142,7 +141,7 @@ except ImportError:
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 EXTENSIONS = (".py", ".js", ".java", ".ts", ".md", ".txt", ".go", ".cpp", ".c", ".h", ".rs")
-EMBED_MODEL = "voyage-code-3"
+EMBED_MODEL = "jina-embeddings-v2-base-code"
 BOOT_ENTRY_CANDIDATES = ("main", "app", "run", "start", "__main__")
 SUPPORTED_ANALYSIS_EXTENSIONS = {
     ".py", ".java", ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs"
@@ -169,67 +168,6 @@ def _env_int(name: str, default: int) -> int:
 EMBED_BATCH_SIZE = max(16, _env_int("INGEST_EMBED_BATCH_SIZE", 128))
 
 
-import threading as _threading
-
-
-class _RateLimitedEmbeddings:
-    """Wraps VoyageAIEmbeddings to enforce the Voyage AI free-tier 3 RPM / 10K TPM limit.
-
-    Free-tier constraints:
-      - 3 RPM  → minimum 20s between API calls
-      - 10K TPM → ~3,333 tokens per call at 3 RPM; sub_batch_size=16 keeps each
-                  API call under that budget (~16 chunks × ~200 tokens ≈ 3,200 tokens)
-
-    Handles sub-batching internally so every individual API request is throttled —
-    not just the outer embed_documents() call. This prevents VoyageAIEmbeddings from
-    firing multiple rapid sub-batch calls that blow past the RPM limit.
-
-    Retries up to 3 times with exponential backoff on rate-limit errors.
-    """
-
-    def __init__(self, embeddings, rpm: int = 3, max_retries: int = 3, sub_batch_size: int = 16):
-        self._embeddings = embeddings
-        self._interval = 60.0 / rpm  # 20 s between API calls
-        self._lock = _threading.Lock()
-        self._last_called = 0.0
-        self._max_retries = max_retries
-        self._sub_batch_size = sub_batch_size
-
-    def _throttle(self):
-        with self._lock:
-            wait = self._interval - (time.time() - self._last_called)
-            if wait > 0:
-                print(f"[Voyage AI] Rate-limit pause: {wait:.1f}s (3 RPM free tier)")
-                time.sleep(wait)
-            self._last_called = time.time()
-
-    def _call_with_retry(self, fn, *args):
-        for attempt in range(self._max_retries):
-            self._throttle()
-            try:
-                return fn(*args)
-            except Exception as exc:
-                msg = str(exc).lower()
-                is_rate_limit = any(k in msg for k in ("rate", "429", "rpm", "tpm", "too many", "quota"))
-                if is_rate_limit and attempt < self._max_retries - 1:
-                    backoff = self._interval * (2 ** attempt)
-                    print(f"[Voyage AI] Rate limit hit (attempt {attempt + 1}), retrying in {backoff:.0f}s...")
-                    time.sleep(backoff)
-                else:
-                    raise
-
-    def embed_documents(self, texts):
-        # Sub-batch manually so every individual API request goes through _throttle(),
-        # preventing VoyageAIEmbeddings internal batching from firing multiple rapid calls.
-        all_embeddings = []
-        for i in range(0, len(texts), self._sub_batch_size):
-            batch = texts[i:i + self._sub_batch_size]
-            result = self._call_with_retry(self._embeddings.embed_documents, batch)
-            all_embeddings.extend(result)
-        return all_embeddings
-
-    def embed_query(self, text):
-        return self._call_with_retry(self._embeddings.embed_query, text)
 FILE_WORKERS = max(1, _env_int("INGEST_FILE_WORKERS", min(8, (os.cpu_count() or 4))))
 MAX_IN_FLIGHT_FILES = max(FILE_WORKERS, _env_int("INGEST_MAX_IN_FLIGHT_FILES", FILE_WORKERS * 2))
 PROGRESS_LOG_EVERY = max(1, _env_int("INGEST_PROGRESS_EVERY", 25))
@@ -486,13 +424,13 @@ except ImportError:
     pass
 
 try:
+    from langchain_community.embeddings import JinaEmbeddings
     from langchain_community.vectorstores import FAISS
     from langchain_core.documents import Document
-    from langchain_voyageai import VoyageAIEmbeddings
 except ImportError:
+    JinaEmbeddings = None
     FAISS = None
     Document = None
-    VoyageAIEmbeddings = None
 
 try:
     from .async_extractor import extract_async_patterns
@@ -1111,13 +1049,11 @@ def ingest_repo(
         if not pending_documents:
             return
 
-        if VoyageAIEmbeddings is None or FAISS is None:
+        if JinaEmbeddings is None or FAISS is None:
             raise RuntimeError("Embedding dependencies are not installed.")
 
         if embeddings is None:
-            embeddings = _RateLimitedEmbeddings(
-                VoyageAIEmbeddings(model=EMBED_MODEL, voyage_api_key=os.getenv("VOYAGE_AI_API_KEY"), batch_size=16)
-            )
+            embeddings = JinaEmbeddings(jina_api_key=os.getenv("JINA_API_KEY"), model_name=EMBED_MODEL)
 
         batch = pending_documents
         pending_documents = []
@@ -1626,9 +1562,7 @@ def ingest_repos(
             aggregated_kg.graph.add_edge(edge)
 
     print("Merging vector stores...")
-    embeddings = _RateLimitedEmbeddings(
-        VoyageAIEmbeddings(model=EMBED_MODEL, voyage_api_key=os.getenv("VOYAGE_AI_API_KEY"), batch_size=16)
-    )
+    embeddings = JinaEmbeddings(jina_api_key=os.getenv("JINA_API_KEY"), model_name=EMBED_MODEL)
     merged_vectorstore = FAISS.from_documents(all_documents, embeddings)
 
     aggregated_paths = _get_repo_paths(None)
