@@ -174,14 +174,21 @@ import threading as _threading
 
 class _RateLimitedEmbeddings:
     """Wraps VoyageAIEmbeddings to enforce the Voyage AI free-tier 3 RPM / 10K TPM limit.
-    Ensures at least 20 seconds between consecutive API calls (60s / 3 RPM).
+
+    Free-tier constraints:
+      - 3 RPM  → minimum 20s between API calls
+      - 10K TPM → ~3,333 tokens per call at 3 RPM; batch_size=16 keeps each call
+                  under that budget (~16 chunks × ~200 tokens ≈ 3,200 tokens/call)
+
+    Retries up to 3 times with exponential backoff on rate-limit errors.
     """
 
-    def __init__(self, embeddings, rpm: int = 3):
+    def __init__(self, embeddings, rpm: int = 3, max_retries: int = 3):
         self._embeddings = embeddings
         self._interval = 60.0 / rpm  # 20 s between API calls
         self._lock = _threading.Lock()
         self._last_called = 0.0
+        self._max_retries = max_retries
 
     def _throttle(self):
         with self._lock:
@@ -191,13 +198,26 @@ class _RateLimitedEmbeddings:
                 time.sleep(wait)
             self._last_called = time.time()
 
+    def _call_with_retry(self, fn, *args):
+        for attempt in range(self._max_retries):
+            self._throttle()
+            try:
+                return fn(*args)
+            except Exception as exc:
+                msg = str(exc).lower()
+                is_rate_limit = any(k in msg for k in ("rate", "429", "rpm", "tpm", "too many", "quota"))
+                if is_rate_limit and attempt < self._max_retries - 1:
+                    backoff = self._interval * (2 ** attempt)
+                    print(f"[Voyage AI] Rate limit hit (attempt {attempt + 1}), retrying in {backoff:.0f}s...")
+                    time.sleep(backoff)
+                else:
+                    raise
+
     def embed_documents(self, texts):
-        self._throttle()
-        return self._embeddings.embed_documents(texts)
+        return self._call_with_retry(self._embeddings.embed_documents, texts)
 
     def embed_query(self, text):
-        self._throttle()
-        return self._embeddings.embed_query(text)
+        return self._call_with_retry(self._embeddings.embed_query, text)
 FILE_WORKERS = max(1, _env_int("INGEST_FILE_WORKERS", min(8, (os.cpu_count() or 4))))
 MAX_IN_FLIGHT_FILES = max(FILE_WORKERS, _env_int("INGEST_MAX_IN_FLIGHT_FILES", FILE_WORKERS * 2))
 PROGRESS_LOG_EVERY = max(1, _env_int("INGEST_PROGRESS_EVERY", 25))
@@ -1084,7 +1104,7 @@ def ingest_repo(
 
         if embeddings is None:
             embeddings = _RateLimitedEmbeddings(
-                VoyageAIEmbeddings(model=EMBED_MODEL, voyage_api_key=os.getenv("VOYAGE_AI_API_KEY"), batch_size=128)
+                VoyageAIEmbeddings(model=EMBED_MODEL, voyage_api_key=os.getenv("VOYAGE_AI_API_KEY"), batch_size=16)
             )
 
         batch = pending_documents
@@ -1595,7 +1615,7 @@ def ingest_repos(
 
     print("Merging vector stores...")
     embeddings = _RateLimitedEmbeddings(
-        VoyageAIEmbeddings(model=EMBED_MODEL, voyage_api_key=os.getenv("VOYAGE_AI_API_KEY"), batch_size=128)
+        VoyageAIEmbeddings(model=EMBED_MODEL, voyage_api_key=os.getenv("VOYAGE_AI_API_KEY"), batch_size=16)
     )
     merged_vectorstore = FAISS.from_documents(all_documents, embeddings)
 
