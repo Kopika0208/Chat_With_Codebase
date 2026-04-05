@@ -17,3 +17,6 @@ tree_sitter==0.20.4
 tree_sitter_languages==1.10.2
 upstash_redis==1.7.0
 uvicorn>=0.12.0
+sentence-transformers==5.1.2
+torch==2.9.0
+transformers==4.57.1
