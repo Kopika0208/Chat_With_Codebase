@@ -18,7 +18,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
-EMBED_MODEL = "voyage-code-3"
+EMBED_MODEL = "jina-embeddings-v2-base-code"
 
 
 # ======================================================
@@ -140,8 +140,8 @@ def load_documentation(repo_name: str) -> Dict:
 
 @lru_cache(maxsize=1)
 def get_embeddings():
-    from langchain_voyageai import VoyageAIEmbeddings
-    return VoyageAIEmbeddings(model=EMBED_MODEL, voyage_api_key=os.getenv("VOYAGE_AI_API_KEY"), batch_size=128)
+    from langchain_community.embeddings import JinaEmbeddings
+    return JinaEmbeddings(jina_api_key=os.getenv("JINA_API_KEY"), model_name=EMBED_MODEL)
 
 
 @lru_cache(maxsize=8)
