@@ -32,6 +32,7 @@ from .ingest import (
     _get_repo_paths,
     _process_repo_file,
     _resolve_call_graph_symbol_fqn,
+    _RateLimitedEmbeddings,
 )
 from .knowledge_graph import KnowledgeGraphBuilder
 from .resolver import SymbolResolver
@@ -392,7 +393,9 @@ def _materialize_outputs(
         if VoyageAIEmbeddings is None or FAISS is None:
             raise RuntimeError("Embedding dependencies are not installed.")
         if embeddings is None:
-            embeddings = VoyageAIEmbeddings(model=EMBED_MODEL, voyage_api_key=os.getenv("VOYAGE_AI_API_KEY"), batch_size=128)
+            embeddings = _RateLimitedEmbeddings(
+                VoyageAIEmbeddings(model=EMBED_MODEL, voyage_api_key=os.getenv("VOYAGE_AI_API_KEY"), batch_size=128)
+            )
 
         batch = pending_documents
         pending_documents = []
