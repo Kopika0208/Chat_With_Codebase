@@ -1,0 +1,41 @@
+{
+  "repo_name": "AskLegal.ai-AI-Legal-Assistant",
+  "timestamp": "2026-04-04T16:28:40.288369+00:00",
+  "call_graph": {
+    "total_callers": 22,
+    "total_nodes": 56,
+    "total_edges": 50,
+    "avg_fan_out": 2.27,
+    "max_fan_out": 8,
+    "density": 0.0325
+  },
+  "knowledge_graph": {
+    "total_nodes": 210,
+    "total_edges": 98,
+    "edge_types": {
+      "dataflow": 48,
+      "calls": 50
+    },
+    "node_types": {
+      "import": 48,
+      "variable": 131,
+      "method": 27,
+      "class": 1,
+      "function": 3
+    },
+    "avg_edges_per_node": 0.47
+  },
+  "symbol_table": {
+    "total_files": 5,
+    "files_with_symbols": 5,
+    "total_symbols": 210,
+    "symbol_coverage_pct": 100.0,
+    "symbol_kinds": {
+      "import": 48,
+      "variable": 131,
+      "method": 27,
+      "class": 1,
+      "function": 3
+    }
+  }
+}

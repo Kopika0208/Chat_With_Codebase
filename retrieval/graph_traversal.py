@@ -67,6 +67,7 @@ class GraphTraversal:
         """Build adjacency indexes from knowledge graph data."""
         # Index nodes - handle both list and dict formats
         nodes_data = kg_data.get("nodes", [])
+        node_candidates_by_file_and_name: Dict[tuple, List[str]] = {}
         
         if isinstance(nodes_data, dict):
             # Dict format: {node_id: node_info}
@@ -74,6 +75,10 @@ class GraphTraversal:
                 self.nodes[node_id] = node
                 self.adjacency_out[node_id] = []
                 self.adjacency_in[node_id] = []
+                file_path = str(node.get("file", "") or "")
+                name = str(node.get("name", "") or "")
+                if file_path and name:
+                    node_candidates_by_file_and_name.setdefault((file_path, name), []).append(node_id)
         else:
             # List format: [{"id": node_id, ...}]
             for node in nodes_data:
@@ -81,21 +86,50 @@ class GraphTraversal:
                 self.nodes[node_id] = node
                 self.adjacency_out[node_id] = []
                 self.adjacency_in[node_id] = []
+                file_path = str(node.get("file", "") or "")
+                name = str(node.get("name", "") or "")
+                if file_path and name:
+                    node_candidates_by_file_and_name.setdefault((file_path, name), []).append(node_id)
         
         # Index edges
         for edge in kg_data.get("edges", []):
-            source_id = edge.get("source")
-            target_id = edge.get("target")
+            source_candidates = self._resolve_edge_endpoint_ids(
+                edge.get("source"),
+                node_candidates_by_file_and_name,
+            )
+            target_candidates = self._resolve_edge_endpoint_ids(
+                edge.get("target"),
+                node_candidates_by_file_and_name,
+            )
             edge_type = edge.get("type")
             properties = edge.get("properties", {})
-            
-            if source_id not in self.adjacency_out:
-                self.adjacency_out[source_id] = []
-            if target_id not in self.adjacency_in:
-                self.adjacency_in[target_id] = []
-            
-            self.adjacency_out[source_id].append((target_id, edge_type, properties))
-            self.adjacency_in[target_id].append((source_id, edge_type, properties))
+
+            for source_id in source_candidates:
+                if source_id not in self.adjacency_out:
+                    self.adjacency_out[source_id] = []
+                for target_id in target_candidates:
+                    if target_id not in self.adjacency_in:
+                        self.adjacency_in[target_id] = []
+                    self.adjacency_out[source_id].append((target_id, edge_type, properties))
+                    self.adjacency_in[target_id].append((source_id, edge_type, properties))
+
+    def _resolve_edge_endpoint_ids(
+        self,
+        endpoint_id: Optional[str],
+        node_candidates_by_file_and_name: Dict[tuple, List[str]],
+    ) -> List[str]:
+        """Resolve legacy edge endpoint ids to actual node ids."""
+        if not endpoint_id:
+            return []
+
+        if endpoint_id in self.nodes:
+            return [endpoint_id]
+
+        file_path, separator, symbol_name = str(endpoint_id).rpartition(":")
+        if not separator:
+            return []
+
+        return list(node_candidates_by_file_and_name.get((file_path, symbol_name), []))
     
     def traverse(
         self,
@@ -317,19 +351,24 @@ class GraphTraversal:
         }
 
 
-def load_knowledge_graph(path: str) -> "GraphTraversal":
-    """Load knowledge graph from JSON and create traversal engine.
-    
+from typing import Union
+
+def load_knowledge_graph(path_or_data: Union[str, dict]) -> "GraphTraversal":
+    """Load knowledge graph from JSON content or file path and create traversal engine.
+
     Args:
-        path: Path to knowledge_graph.json
-    
+        path_or_data: Path to knowledge_graph.json or preloaded graph dict
+
     Returns:
         GraphTraversal instance
     """
-    with open(path, "r", encoding="utf-8") as f:
-        kg_data = json.load(f)
-    
-    # Handle both formats: plain {"nodes": [...], "edges": [...]} and {"metadata": {...}, "nodes": [...], "edges": [...]}
+    if isinstance(path_or_data, dict):
+        kg_data = path_or_data
+    else:
+        with open(path_or_data, "r", encoding="utf-8") as f:
+            kg_data = json.load(f)
+
+    # Handle both formats: plain {"nodes": [...], "edges": [...]} and {"metadata": {...}, "nodes": [...], "edges": [...]} 
     if "nodes" not in kg_data and "metadata" in kg_data:
         # Old format with metadata at top level - extract nodes and edges
         graph_data = {
@@ -339,5 +378,5 @@ def load_knowledge_graph(path: str) -> "GraphTraversal":
     else:
         # Use as-is
         graph_data = kg_data
-    
+
     return GraphTraversal(graph_data)

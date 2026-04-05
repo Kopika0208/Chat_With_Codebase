@@ -12,14 +12,13 @@ from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 from collections import defaultdict
 
+from redis_storage import get_json
+
 
 def load_contributions_data(repo_name: str) -> Optional[Dict]:
-    """Load contributions data from the data directory."""
+    """Load contributions data from Redis."""
     try:
-        contributions_path = os.path.join("data", repo_name, "contributions.json")
-        if os.path.exists(contributions_path):
-            with open(contributions_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
+        return get_json(repo_name, "contributions")
     except Exception as e:
         print(f"⚠️ Error loading contributions data: {e}")
     return None
@@ -391,7 +390,7 @@ def render_contributions_tab(repo_name: str):
     try:
         import pandas as pd
         
-        top_n_dist = min(20, len(merged_authors))
+        top_n_dist = min(10, len(merged_authors))
         chart_names = []
         chart_commits = []
         

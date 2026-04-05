@@ -1,0 +1,39 @@
+{
+  "repo_name": "json",
+  "timestamp": "2026-03-22T17:48:21.796271+00:00",
+  "ingestion_method": "ZIP",
+  "timing": {
+    "total_seconds": 2402.58,
+    "load_seconds": 7.49,
+    "process_seconds": 2245.74
+  },
+  "file_metrics": {
+    "total_found": 49,
+    "processed": 430,
+    "skipped": 0
+  },
+  "parser_distribution": {
+    "regex_fallback": 466,
+    "tree_sitter": 1510
+  },
+  "chunk_metrics": {
+    "total_chunks": 1976,
+    "avg_per_file": 4.6
+  },
+  "symbol_metrics": {
+    "total_symbols": 1660,
+    "files_with_symbols": 430,
+    "coverage_pct": 100.0
+  },
+  "knowledge_graph": {
+    "nodes": 1660,
+    "edges": 37,
+    "edge_types": {
+      "dataflow": 37
+    }
+  },
+  "embedding_metrics": {
+    "total_embedded": 1976,
+    "model": "mixedbread-ai/mxbai-embed-large-v1"
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "repo_name": "MeetMate-AI-Meeting-Assistant",
+  "timestamp": "2026-04-04T16:55:17.618286+00:00",
+  "call_graph": {
+    "total_callers": 16,
+    "total_nodes": 40,
+    "total_edges": 27,
+    "avg_fan_out": 1.69,
+    "max_fan_out": 6,
+    "density": 0.0346
+  },
+  "knowledge_graph": {
+    "total_nodes": 202,
+    "total_edges": 76,
+    "edge_types": {
+      "calls": 27,
+      "dataflow": 49
+    },
+    "node_types": {
+      "import": 44,
+      "variable": 133,
+      "method": 24,
+      "function": 1
+    },
+    "avg_edges_per_node": 0.38
+  },
+  "symbol_table": {
+    "total_files": 3,
+    "files_with_symbols": 3,
+    "total_symbols": 202,
+    "symbol_coverage_pct": 100.0,
+    "symbol_kinds": {
+      "import": 44,
+      "variable": 133,
+      "method": 24,
+      "function": 1
+    }
+  }
+}

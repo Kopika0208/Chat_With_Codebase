@@ -5,7 +5,7 @@ from typing import List, Tuple, Optional
 from .semantic_analyzer import TreeSitterSemanticAnalyzer, _HAS_TREE_SITTER
 
 
-def extract_python_calls(text: str) -> List[Tuple[str, str]]:
+def extract_python_calls(text: str, tree: Optional[ast.AST] = None) -> List[Tuple[str, str]]:
     """
     Use Python AST to extract function -> function calls (within a file).
     Returns list of (caller_name, callee_symbol).
@@ -13,7 +13,7 @@ def extract_python_calls(text: str) -> List[Tuple[str, str]]:
     """
     calls = []
     try:
-        tree = ast.parse(text)
+        tree = tree or ast.parse(text)
     except Exception:
         return calls
 
@@ -104,7 +104,7 @@ def extract_js_ts_calls(text: str, file_ext: str) -> List[Tuple[str, str]]:
         return []
 
 
-def extract_calls_unified(text: str, file_ext: str) -> List[Tuple[str, str]]:
+def extract_calls_unified(text: str, file_ext: str, tree: Optional[ast.AST] = None) -> List[Tuple[str, str]]:
     """
     Unified call graph extraction for ANY language.
     
@@ -115,6 +115,6 @@ def extract_calls_unified(text: str, file_ext: str) -> List[Tuple[str, str]]:
     Returns list of (caller_name, callee_symbol).
     """
     if file_ext.lower() == ".py":
-        return extract_python_calls(text)
+        return extract_python_calls(text, tree=tree)
     else:
         return extract_js_ts_calls(text, file_ext)

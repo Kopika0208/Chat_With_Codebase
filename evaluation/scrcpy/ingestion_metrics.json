@@ -1,0 +1,37 @@
+{
+  "repo_name": "scrcpy",
+  "timestamp": "2026-03-22T17:02:44.237507+00:00",
+  "ingestion_method": "API",
+  "timing": {
+    "total_seconds": 4091.51,
+    "load_seconds": 266.08,
+    "process_seconds": 3247.85
+  },
+  "file_metrics": {
+    "total_found": 384,
+    "processed": 265,
+    "skipped": 119
+  },
+  "parser_distribution": {
+    "tree_sitter": 1746,
+    "regex_fallback": 35
+  },
+  "chunk_metrics": {
+    "total_chunks": 1781,
+    "avg_per_file": 6.72
+  },
+  "symbol_metrics": {
+    "total_symbols": 2869,
+    "files_with_symbols": 265,
+    "coverage_pct": 100.0
+  },
+  "knowledge_graph": {
+    "nodes": 2869,
+    "edges": 0,
+    "edge_types": {}
+  },
+  "embedding_metrics": {
+    "total_embedded": 1781,
+    "model": "mixedbread-ai/mxbai-embed-large-v1"
+  }
+}

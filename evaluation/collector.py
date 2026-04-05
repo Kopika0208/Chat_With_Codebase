@@ -6,6 +6,12 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from statistics import mean, median
 
+try:
+    from redis_storage import save_json, get_json
+except ImportError:
+    save_json = None
+    get_json = None
+
 
 def _eval_dir(repo_name: str) -> str:
     """Get or create evaluation directory for a repo."""
@@ -16,6 +22,36 @@ def _eval_dir(repo_name: str) -> str:
     )
     os.makedirs(eval_root, exist_ok=True)
     return eval_root
+
+
+def _evaluation_data_type(metric_file: str) -> str:
+    return f"evaluation:{metric_file[:-5]}"
+
+
+def _save_evaluation_data(repo_name: str, metric_file: str, data: dict) -> None:
+    if save_json:
+        try:
+            save_json(repo_name, _evaluation_data_type(metric_file), data)
+        except Exception:
+            pass
+
+
+def _load_evaluation_data(repo_name: str, metric_file: str) -> dict:
+    data = None
+    if get_json:
+        try:
+            data = get_json(repo_name, _evaluation_data_type(metric_file))
+        except Exception:
+            data = None
+    if data is None:
+        path = os.path.join(_eval_dir(repo_name), metric_file)
+        if os.path.exists(path):
+            try:
+                with open(path) as f:
+                    data = json.load(f)
+            except Exception:
+                data = None
+    return data or {}
 
 
 def _utc_now() -> str:
@@ -166,7 +202,7 @@ def save_ingestion_metrics(
         dest = os.path.join(_eval_dir(repo_name), "ingestion_metrics.json")
         with open(dest, "w") as f:
             json.dump(metrics, f, indent=2, default=str)
-            
+        _save_evaluation_data(repo_name, "ingestion_metrics.json", metrics)
     except Exception as e:
         print(f"[Evaluation] Warning: Failed to save ingestion metrics: {e}")
 
@@ -201,13 +237,7 @@ def save_retrieval_metrics(
         dest = os.path.join(_eval_dir(repo_name), "retrieval_metrics.json")
         
         # Read existing
-        existing = {}
-        if os.path.exists(dest):
-            try:
-                with open(dest) as f:
-                    existing = json.load(f)
-            except Exception:
-                pass
+        existing = _load_evaluation_data(repo_name, "retrieval_metrics.json")
         
         queries = existing.get("queries", [])
         
@@ -289,18 +319,15 @@ def save_retrieval_metrics(
         }
         
         # Write back complete file
+        output = {
+            "repo_name": repo_name,
+            "last_updated": _utc_now(),
+            "queries": queries,
+            "aggregate": aggregate,
+        }
         with open(dest, "w") as f:
-            json.dump(
-                {
-                    "repo_name": repo_name,
-                    "last_updated": _utc_now(),
-                    "queries": queries,
-                    "aggregate": aggregate,
-                },
-                f,
-                indent=2,
-                default=str,
-            )
+            json.dump(output, f, indent=2, default=str)
+        _save_evaluation_data(repo_name, "retrieval_metrics.json", output)
             
     except Exception as e:
         print(f"[Evaluation] Warning: Failed to save retrieval metrics: {e}")
@@ -333,7 +360,7 @@ def save_code_health_metrics(
         dest = os.path.join(_eval_dir(repo_name), "code_health_metrics.json")
         with open(dest, "w") as f:
             json.dump(metrics, f, indent=2, default=str)
-            
+        _save_evaluation_data(repo_name, "code_health_metrics.json", metrics)
     except Exception as e:
         print(f"[Evaluation] Warning: Failed to save code health metrics: {e}")
 
@@ -392,7 +419,7 @@ def save_contribution_metrics(
         dest = os.path.join(_eval_dir(repo_name), "contribution_metrics.json")
         with open(dest, "w") as f:
             json.dump(metrics, f, indent=2, default=str)
-            
+        _save_evaluation_data(repo_name, "contribution_metrics.json", metrics)
     except Exception as e:
         print(f"[Evaluation] Warning: Failed to save contribution metrics: {e}")
 
@@ -489,7 +516,7 @@ def save_graph_metrics(
         dest = os.path.join(_eval_dir(repo_name), "graph_metrics.json")
         with open(dest, "w") as f:
             json.dump(metrics, f, indent=2, default=str)
-            
+        _save_evaluation_data(repo_name, "graph_metrics.json", metrics)
     except Exception as e:
         print(f"[Evaluation] Warning: Failed to save graph metrics: {e}")
 
@@ -497,8 +524,6 @@ def save_graph_metrics(
 def load_evaluation_summary(repo_name: str) -> dict:
     """Load and combine all metric files into one summary dict."""
     summary = {"repo_name": repo_name, "files": {}}
-    
-    eval_root = _eval_dir(repo_name)
     metric_files = [
         "ingestion_metrics.json",
         "retrieval_metrics.json",
@@ -508,16 +533,14 @@ def load_evaluation_summary(repo_name: str) -> dict:
     ]
     
     for metric_file in metric_files:
-        path = os.path.join(eval_root, metric_file)
         try:
-            if os.path.exists(path):
-                with open(path) as f:
-                    data = json.load(f)
-                    # For retrieval metrics, only include aggregate, not full queries
-                    if metric_file == "retrieval_metrics.json" and "aggregate" in data:
-                        summary["files"][metric_file] = {"aggregate": data["aggregate"]}
-                    else:
-                        summary["files"][metric_file] = data
+            data = _load_evaluation_data(repo_name, metric_file)
+            if not data:
+                continue
+            if metric_file == "retrieval_metrics.json" and "aggregate" in data:
+                summary["files"][metric_file] = {"aggregate": data["aggregate"]}
+            else:
+                summary["files"][metric_file] = data
         except Exception as e:
             print(f"[Evaluation] Warning: Failed to load {metric_file}: {e}")
     

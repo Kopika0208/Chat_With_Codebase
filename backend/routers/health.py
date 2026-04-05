@@ -10,6 +10,7 @@ from backend.deps import (
     get_repo_source_path, get_repo_paths,
 )
 from backend.health_analysis import compute_health_payload
+from redis_storage import save_json
 
 router = APIRouter(prefix="/api/repos/{repo_name}", tags=["health"])
 
@@ -36,11 +37,8 @@ def get_health(repo_name: str):
     except ImportError as e:
         raise HTTPException(status_code=500, detail=f"Code health modules not available: {e}")
 
-    health_path = get_repo_paths(repo_name)["health"]
     try:
-        import json
-        with open(health_path, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2, ensure_ascii=False, default=str)
+        save_json(repo_name, "code_health", payload)
     except Exception:
         pass
 

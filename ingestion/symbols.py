@@ -439,7 +439,7 @@ class PythonSymbolExtractor(ast.NodeVisitor):
         return None
 
 
-def extract_python_symbols(file_path: str, source_code: str) -> SymbolTable:
+def extract_python_symbols(file_path: str, source_code: str, tree: Optional[ast.AST] = None) -> SymbolTable:
     """
     Extract all symbols from Python source code using AST.
     Returns a populated SymbolTable.
@@ -447,7 +447,7 @@ def extract_python_symbols(file_path: str, source_code: str) -> SymbolTable:
     symbol_table = SymbolTable(file_path)
     
     try:
-        tree = ast.parse(source_code)
+        tree = tree or ast.parse(source_code)
         extractor = PythonSymbolExtractor(symbol_table, source_code)
         extractor.visit(tree)
     except Exception as e:
@@ -456,7 +456,12 @@ def extract_python_symbols(file_path: str, source_code: str) -> SymbolTable:
     return symbol_table
 
 
-def extract_symbols_unified(file_path: str, source_code: str, language: Optional[str] = None) -> SymbolTable:
+def extract_symbols_unified(
+    file_path: str,
+    source_code: str,
+    language: Optional[str] = None,
+    tree: Optional[ast.AST] = None,
+) -> SymbolTable:
     """
     Unified symbol extraction for ANY language.
     
@@ -482,7 +487,7 @@ def extract_symbols_unified(file_path: str, source_code: str, language: Optional
     """
     # For Python, use the native AST analyzer
     if file_path.endswith(".py"):
-        return extract_python_symbols(file_path, source_code)
+        return extract_python_symbols(file_path, source_code, tree=tree)
     
     # For other languages, use Tree-sitter semantic analyzer
     try:

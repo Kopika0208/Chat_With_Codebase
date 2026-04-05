@@ -10,6 +10,8 @@ import sys
 from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
+from redis_storage import get_json, list_repos as list_redis_repos, repo_exists
+
 # Add project root to path
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
@@ -25,12 +27,7 @@ EMBED_MODEL = "mixedbread-ai/mxbai-embed-large-v1"
 
 def list_repos() -> List[str]:
     """List all ingested repositories."""
-    if not os.path.exists(DATA_DIR):
-        return []
-    return sorted(
-        d for d in os.listdir(DATA_DIR)
-        if os.path.isdir(os.path.join(DATA_DIR, d))
-    )
+    return list_redis_repos()
 
 
 def get_repo_paths(repo_name: str) -> Dict[str, str]:
@@ -71,26 +68,24 @@ def get_repo_source_path(repo_name: str) -> str:
 _json_cache: Dict[str, Any] = {}
 
 
-def _load_json(path: str) -> Any:
-    """Load JSON file with caching."""
-    if path in _json_cache:
-        return _json_cache[path]
-    if not os.path.exists(path):
-        return {}
+def _load_json(repo_name: str, data_type: str) -> Any:
+    """Load JSON content from Redis with caching."""
+    key = f"repo:{repo_name}:{data_type}"
+    if key in _json_cache:
+        return _json_cache[key]
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        _json_cache[path] = data
+        data = get_json(repo_name, data_type) or {}
+        _json_cache[key] = data
         return data
     except Exception as e:
-        print(f"Warning: Failed to load {path}: {e}")
+        print(f"Warning: Failed to load Redis key {key}: {e}")
         return {}
 
 
 def clear_repo_cache(repo_name: str):
     """Clear all cached data for a repo (call after re-ingestion)."""
-    paths = get_repo_paths(repo_name)
-    keys_to_remove = [k for k in _json_cache if any(k.startswith(p) for p in paths.values())]
+    prefix = f"repo:{repo_name}:"
+    keys_to_remove = [k for k in _json_cache if k.startswith(prefix)]
     for k in keys_to_remove:
         _json_cache.pop(k, None)
     # Also clear lru_cache entries
@@ -100,43 +95,43 @@ def clear_repo_cache(repo_name: str):
 
 
 def load_call_graph(repo_name: str) -> Dict:
-    return _load_json(get_repo_paths(repo_name)["callgraph"])
+    return _load_json(repo_name, "call_graph")
 
 
 def load_health(repo_name: str) -> Dict:
-    return _load_json(get_repo_paths(repo_name)["health"])
+    return _load_json(repo_name, "code_health")
 
 
 def load_symbol_table(repo_name: str) -> Dict:
-    return _load_json(get_repo_paths(repo_name)["symbol"])
+    return _load_json(repo_name, "symbol_table")
 
 
 def load_knowledge_graph(repo_name: str) -> Dict:
-    return _load_json(get_repo_paths(repo_name)["knowledge"])
+    return _load_json(repo_name, "knowledge_graph")
 
 
 def load_boot_chain(repo_name: str) -> Dict:
-    return _load_json(get_repo_paths(repo_name)["bootchain"])
+    return _load_json(repo_name, "boot_chain")
 
 
 def load_core_structures(repo_name: str) -> Dict:
-    return _load_json(get_repo_paths(repo_name)["corestructures"])
+    return _load_json(repo_name, "core_structures")
 
 
 def load_dataflow(repo_name: str) -> Dict:
-    return _load_json(get_repo_paths(repo_name)["dataflow"])
+    return _load_json(repo_name, "dataflow_analysis")
 
 
 def load_async_patterns(repo_name: str) -> Dict:
-    return _load_json(get_repo_paths(repo_name)["asyncpatterns"])
+    return _load_json(repo_name, "async_patterns")
 
 
 def load_contributions(repo_name: str) -> Dict:
-    return _load_json(get_repo_paths(repo_name)["contributions"])
+    return _load_json(repo_name, "contributions")
 
 
 def load_documentation(repo_name: str) -> Dict:
-    return _load_json(get_repo_paths(repo_name)["documentation"])
+    return _load_json(repo_name, "documentation")
 
 
 # ======================================================
@@ -181,9 +176,12 @@ def get_llm():
 @lru_cache(maxsize=8)
 def _get_graph_rag_retriever_cached(repo_name: str):
     try:
-        paths = get_repo_paths(repo_name)
         vectorstore = get_vectorstore(repo_name)
-        if not vectorstore or not os.path.exists(paths["knowledge"]):
+        if not vectorstore or not repo_exists(repo_name, "knowledge_graph"):
+            return None
+
+        knowledge_graph = load_knowledge_graph(repo_name)
+        if not knowledge_graph:
             return None
 
         # Import graph_rag from retrieval package
@@ -193,7 +191,7 @@ def _get_graph_rag_retriever_cached(repo_name: str):
         all_documents = list(vectorstore.docstore._dict.values())
         return create_graph_rag_retriever(
             vectorstore=vectorstore,
-            knowledge_graph_path=paths["knowledge"],
+            knowledge_graph_source=knowledge_graph,
             documents=all_documents,
             repo_name=repo_name,
         )
@@ -221,9 +219,9 @@ def get_repo_summary(repo_name: str) -> Dict:
         "classes": 0,
         "loc": 0,
         "languages": [],
-        "has_callgraph": os.path.exists(paths["callgraph"]),
-        "has_knowledge_graph": os.path.exists(paths["knowledge"]),
-        "has_contributions": os.path.exists(paths["contributions"]),
+        "has_callgraph": repo_exists(repo_name, "call_graph"),
+        "has_knowledge_graph": repo_exists(repo_name, "knowledge_graph"),
+        "has_contributions": repo_exists(repo_name, "contributions"),
         "has_vectorstore": os.path.exists(paths["vector"]),
     }
 

@@ -256,6 +256,8 @@ class KnowledgeGraphBuilder:
         self.class_hierarchy: Dict[str, List[str]] = {}
         self.method_map: Dict[str, Dict[str, str]] = {}
         self.test_methods: Dict[str, str] = {}
+        self.symbol_ids_by_file_and_name: Dict[Tuple[str, str], List[str]] = defaultdict(list)
+        self.symbol_ids_by_name: Dict[str, List[str]] = defaultdict(list)
     
     def build_from_symbols(self, symbol_tables: Dict[str, SymbolTable]) -> None:
         """Build graph from symbol tables."""
@@ -278,6 +280,8 @@ class KnowledgeGraphBuilder:
                     }
                 )
                 self.graph.add_node(node)
+                self.symbol_ids_by_file_and_name[(file_path, symbol.name)].append(fqn)
+                self.symbol_ids_by_name[symbol.name].append(fqn)
         
         # Second pass: add edges
         for file_path, symbol_table in symbol_tables.items():
@@ -296,10 +300,14 @@ class KnowledgeGraphBuilder:
         
         for file_path, functions in dataflow_by_file.items():
             for func_name, analysis in functions.items():
-                func_node_id = f"{file_path}:{func_name}"
+                func_node_id = self._resolve_symbol_id(
+                    file_path=file_path,
+                    symbol_name=func_name,
+                    preferred_kinds={"function", "method"},
+                )
                 
                 # Only add dataflow edges if the function node exists
-                if func_node_id not in self.graph.nodes:
+                if not func_node_id or func_node_id not in self.graph.nodes:
                     continue
                 
                 # Add def-use chain edges
@@ -332,7 +340,13 @@ class KnowledgeGraphBuilder:
         function_analysis = {}
         for file_path, functions in dataflow_by_file.items():
             for func_name, analysis in functions.items():
-                function_analysis[f"{file_path}:{func_name}"] = analysis
+                func_node_id = self._resolve_symbol_id(
+                    file_path=file_path,
+                    symbol_name=func_name,
+                    preferred_kinds={"function", "method"},
+                )
+                if func_node_id:
+                    function_analysis[func_node_id] = analysis
 
         edges_added = 0
         for caller_fqn, callees in call_graph.items():
@@ -447,7 +461,11 @@ class KnowledgeGraphBuilder:
         scope = symbol_table.scopes.get(symbol.scope_id)
         if scope and scope.scope_type == "class" and scope.mro:
             for base_class in scope.mro:
-                base_fqn = f"{file_path}:{base_class}" if ":" not in base_class else base_class
+                base_fqn = self._resolve_symbol_id(
+                    file_path=file_path,
+                    symbol_name=base_class.split(":")[-1] if ":" in base_class else base_class,
+                    preferred_kinds={"class"},
+                ) if ":" not in base_class else base_class
                 if base_fqn in self.graph.nodes:
                     edge = KnowledgeGraphEdge(
                         source_id=fqn,
@@ -487,10 +505,14 @@ class KnowledgeGraphBuilder:
                 )
                 self.graph.add_edge(edge)
     
-    def export(self, path: str) -> None:
-        """Export the knowledge graph to JSON."""
-        self.graph.to_json(path)
-        print(f"💾 Knowledge graph saved to {path}")
+    def export(self, path: Optional[str] = None) -> Dict[str, Any]:
+        """Export the knowledge graph to JSON or return it as a data structure."""
+        data = self.graph.export_to_dict()
+        if path:
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(data, handle, indent=2, ensure_ascii=False)
+            print(f"💾 Knowledge graph saved to {path}")
+        return data
     
     def get_graph(self) -> KnowledgeGraph:
         """Return the built knowledge graph."""
@@ -514,7 +536,11 @@ class KnowledgeGraphBuilder:
                     scope = symbol_table.scopes.get(symbol.scope_id)
                     if scope and scope.mro:
                         for base_class in scope.mro:
-                            base_fqn = f"{file_path}:{base_class}" if ":" not in base_class else base_class
+                            base_fqn = self._resolve_symbol_id(
+                                file_path=file_path,
+                                symbol_name=base_class.split(":")[-1] if ":" in base_class else base_class,
+                                preferred_kinds={"class"},
+                            ) if ":" not in base_class else base_class
                             base_methods = class_methods.get(base_fqn, set())
                             
                             for method_name in class_methods.get(fqn, set()):
@@ -551,3 +577,26 @@ class KnowledgeGraphBuilder:
                                 properties={"class": fqn}
                             )
                             self.graph.add_edge(edge)
+
+    def _resolve_symbol_id(
+        self,
+        file_path: str,
+        symbol_name: str,
+        preferred_kinds: Optional[Set[str]] = None,
+    ) -> Optional[str]:
+        """Resolve a short symbol name to the canonical node id used in the graph."""
+        if not symbol_name:
+            return None
+
+        candidates = list(self.symbol_ids_by_file_and_name.get((file_path, symbol_name), []))
+        if not candidates:
+            candidates = list(self.symbol_ids_by_name.get(symbol_name, []))
+        if not candidates:
+            return None
+
+        if preferred_kinds:
+            typed = [candidate for candidate in candidates if self.graph.nodes[candidate].node_type in preferred_kinds]
+            if typed:
+                candidates = typed
+
+        return candidates[0]

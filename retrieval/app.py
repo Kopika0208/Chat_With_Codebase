@@ -8,6 +8,8 @@ import sys, os
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, PROJECT_ROOT)
 
+from redis_storage import list_repos as list_redis_repos
+
 print("DEBUG: USING PROJECT ROOT =", PROJECT_ROOT)
 print("DEBUG: CURRENT WORKING DIRECTORY =", os.getcwd())
 
@@ -17,13 +19,8 @@ print("DEBUG: CURRENT WORKING DIRECTORY =", os.getcwd())
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 
 def list_ingested_repos():
-    """List all ingested repositories from the data directory."""
-    if not os.path.exists(DATA_DIR):
-        return []
-    return sorted(
-        d for d in os.listdir(DATA_DIR)
-        if os.path.isdir(os.path.join(DATA_DIR, d))
-    )
+    """List all ingested repositories from Redis."""
+    return list_redis_repos()
 
 
 def _get_repo_source_path(repo_name: str) -> str:

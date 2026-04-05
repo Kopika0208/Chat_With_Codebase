@@ -129,11 +129,33 @@ def get_contributions(repo_name: str):
     if not raw or not raw.get("authors"):
         return {"authors": [], "total_commits": 0, "total_authors": 0, "analysis_scope": {}}
 
-    merged = _merge_authors(raw.get("authors", {}))
+    # Check if data is already merged (has 'emails' field indicating merged authors)
+    authors_dict = raw.get("authors", {})
+    is_already_merged = any(isinstance(data, dict) and "emails" in data for data in authors_dict.values())
+
+    if is_already_merged:
+        # Data is already merged, convert to expected format
+        merged = []
+        for email, data in authors_dict.items():
+            merged.append({
+                "name": data.get("name", email),
+                "commits": data.get("commits", 0),
+                "files_changed": data.get("files_changed", 0),
+                "lines_added": data.get("lines_added", 0),
+                "lines_deleted": data.get("lines_deleted", 0),
+                "net_lines": data.get("net_lines", 0),
+                "first_commit": data.get("first_commit"),
+                "last_commit": data.get("last_commit"),
+                "recent_commits": data.get("recent_commits", []),
+                "emails": data.get("emails", [email]),
+            })
+    else:
+        # Apply merging to raw data
+        merged = _merge_authors(authors_dict)
 
     return {
         "authors": merged,
-        "total_commits": sum(a["commits"] for a in merged),
+        "total_commits": raw.get("total_commits", sum(a["commits"] for a in merged)),
         "total_authors": len(merged),
         "analysis_scope": raw.get("analysis_scope", {}),
     }

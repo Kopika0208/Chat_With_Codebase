@@ -1,7 +1,10 @@
 # chunking.py - Code chunking with multiple parsers
 
 import ast
+import os
 import re
+import threading
+from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
 # Tree-sitter imports (optional)
@@ -23,6 +26,8 @@ MAX_CHUNK_LINES = 200
 LARGE_FILE_LINE_THRESHOLD = 300
 MAX_CHUNK_TOKENS_ESTIMATE = 1600
 CHUNK_OVERLAP_LINES = 40
+PARSER_DEBUG = os.getenv("INGEST_DEBUG_PARSERS", "").strip().lower() in {"1", "true", "yes", "on"}
+_THREAD_LOCAL = threading.local()
 
 
 def _approx_token_count(text: str) -> int:
@@ -183,6 +188,42 @@ def _get_node_text(source_bytes: bytes, node):
     return source_bytes[node.start_byte:node.end_byte].decode(errors="ignore")
 
 
+@lru_cache(maxsize=None)
+def _get_cached_language(lang_name: str):
+    if not _HAS_TS_LANGS:
+        return None
+    try:
+        return get_language(lang_name)
+    except Exception:
+        return None
+
+
+def _get_thread_local_parser(lang_name: str):
+    if not _HAS_TREE_SITTER:
+        return None
+    parser_cache = getattr(_THREAD_LOCAL, "parsers", None)
+    if parser_cache is None:
+        parser_cache = {}
+        _THREAD_LOCAL.parsers = parser_cache
+
+    parser = parser_cache.get(lang_name)
+    if parser is not None:
+        return parser
+
+    language = _get_cached_language(lang_name)
+    if language is None:
+        return None
+
+    try:
+        parser = Parser()
+        parser.set_language(language)
+    except Exception:
+        return None
+
+    parser_cache[lang_name] = parser
+    return parser
+
+
 def code_chunks_with_treesitter(text: str, file_ext: str):
     """
     Use tree-sitter to extract function/class/method level chunks.
@@ -195,20 +236,8 @@ def code_chunks_with_treesitter(text: str, file_ext: str):
     if not lang_name:
         return None
 
-    language = None
-    if _HAS_TS_LANGS:
-        try:
-            language = get_language(lang_name)
-        except Exception:
-            language = None
-
-    if language is None:
-        return None
-
-    try:
-        parser = Parser()
-        parser.set_language(language)
-    except Exception:
+    parser = _get_thread_local_parser(lang_name)
+    if parser is None:
         return None
 
     source_bytes = text.encode()
@@ -297,14 +326,14 @@ def code_chunks_with_treesitter(text: str, file_ext: str):
     return _normalize_chunks(chunks, lang_name, "tree_sitter")
 
 
-def python_ast_parse(text: str):
+def python_ast_parse(text: str, tree: Optional[ast.AST] = None):
     """
     Use Python's ast module to extract functions, classes, decorators, parameters,
     parent relationships, imports, and source segments.
     Returns list of chunk dicts similar to tree-sitter output.
     """
     try:
-        tree = ast.parse(text)
+        tree = tree or ast.parse(text)
     except Exception:
         return []
 
@@ -392,7 +421,7 @@ def python_ast_parse(text: str):
     return _normalize_chunks(collector.collected, "python", "python_ast")
 
 
-def extract_chunks(text: str, file_ext: str):
+def extract_chunks(text: str, file_ext: str, syntax_tree: Optional[ast.AST] = None):
     """
     Try: tree-sitter -> python AST (if .py) -> regex fallback.
     Returns list of chunk dicts with standardized fields.
@@ -404,20 +433,24 @@ def extract_chunks(text: str, file_ext: str):
             for chunk in ts_chunks:
                 if "language" not in chunk:
                     chunk["language"] = EXT_TO_TS_LANG.get(ext, ext.lstrip("."))
-            print(f"Using Tree-sitter for {ext}, chunks: {len(ts_chunks)}")
+            if PARSER_DEBUG:
+                print(f"Using Tree-sitter for {ext}, chunks: {len(ts_chunks)}")
             return ts_chunks
-        print(f"Tree-sitter unavailable or produced no chunks for {ext}.")
+        if PARSER_DEBUG:
+            print(f"Tree-sitter unavailable or produced no chunks for {ext}.")
     except Exception as exc:
         print(f"Error using Tree-sitter for {ext}: {exc}")
 
     if ext == ".py":
         try:
-            ast_chunks = python_ast_parse(text)
+            ast_chunks = python_ast_parse(text, tree=syntax_tree)
             if ast_chunks:
-                print(f"Used Python AST parser, chunks: {len(ast_chunks)}")
+                if PARSER_DEBUG:
+                    print(f"Used Python AST parser, chunks: {len(ast_chunks)}")
                 return ast_chunks
         except Exception as exc:
             print(f"Python AST fallback failed: {exc}")
 
-    print(f"Falling back to regex splitter for {ext}")
+    if PARSER_DEBUG:
+        print(f"Falling back to regex splitter for {ext}")
     return simple_function_split(text, language=EXT_TO_TS_LANG.get(ext, ext.lstrip(".")))

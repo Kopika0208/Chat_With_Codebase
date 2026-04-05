@@ -87,10 +87,10 @@ class AsyncPatternVisitor(ast.NodeVisitor):
         return any(token in lowered for token in ("celery", "task", "background", "job", "shared_task"))
 
 
-def extract_async_patterns(file_path: str, source_code: str) -> Dict[str, Any]:
+def extract_async_patterns(file_path: str, source_code: str, tree: ast.AST = None) -> Dict[str, Any]:
     """Extract async/background patterns from a Python file."""
     try:
-        tree = ast.parse(source_code)
+        tree = tree or ast.parse(source_code)
     except Exception as e:
         print(f"⚠️ Failed to parse async patterns in {file_path}: {e}")
         return {}

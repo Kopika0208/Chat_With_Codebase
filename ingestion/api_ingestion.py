@@ -16,6 +16,7 @@ from .github_loader import (
     get_repo_metadata,
     get_repo_tree,
 )
+from redis_storage import delete_keys, get_json, get_json_by_key, list_keys, save_json, save_json_key
 from .github_contributions import extract_contributions_via_api, save_contributions
 from .ingest import (
     EMBED_BATCH_SIZE,
@@ -26,9 +27,11 @@ from .ingest import (
     PROGRESS_LOG_EVERY,
     _build_boot_chain,
     _build_core_structures,
+    _build_symbol_name_lookup,
     _build_symbol_metadata,
     _get_repo_paths,
     _process_repo_file,
+    _resolve_call_graph_symbol_fqn,
 )
 from .knowledge_graph import KnowledgeGraphBuilder
 from .resolver import SymbolResolver
@@ -178,26 +181,15 @@ def _artifact_path(repo_name: str, rel_path: str) -> str:
 
 
 def _load_metadata(repo_name: str) -> Dict[str, Any]:
-    path = _metadata_path(repo_name)
-    if not os.path.exists(path):
-        return {}
-    with open(path, "r", encoding="utf-8") as handle:
-        return json.load(handle)
+    return get_json(repo_name, "metadata") or {}
 
 
 def _load_existing_contributions(repo_name: str) -> Optional[Dict[str, Any]]:
-    path = os.path.join(_get_repo_paths(repo_name)["data_dir"], "contributions.json")
-    if not os.path.exists(path):
-        return None
-    with open(path, "r", encoding="utf-8") as handle:
-        return json.load(handle)
+    return get_json(repo_name, "contributions")
 
 
 def _save_metadata(repo_name: str, payload: Dict[str, Any]) -> None:
-    path = _metadata_path(repo_name)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, ensure_ascii=False)
+    save_json(repo_name, "metadata", payload)
 
 
 def _path_is_supported(rel_path: str, size: Optional[int] = None) -> bool:
@@ -345,31 +337,25 @@ def _deserialize_processed_result(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _persist_artifact(repo_name: str, rel_path: str, sha: Optional[str], result: Dict[str, Any]) -> None:
-    os.makedirs(_artifact_dir(repo_name), exist_ok=True)
     payload = _serialize_processed_result(result, rel_path, sha)
-    with open(_artifact_path(repo_name, rel_path), "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, ensure_ascii=False)
+    digest = hashlib.sha1(rel_path.encode("utf-8")).hexdigest()
+    save_json_key(f"repo:{repo_name}:api_artifact:{digest}", payload)
 
 
 def _load_all_artifacts(repo_name: str) -> List[Dict[str, Any]]:
-    artifact_root = _artifact_dir(repo_name)
-    if not os.path.exists(artifact_root):
-        return []
-
+    artifact_keys = sorted(list_keys(f"repo:{repo_name}:api_artifact:*"))
     results: List[Dict[str, Any]] = []
-    for file_name in sorted(os.listdir(artifact_root)):
-        if not file_name.endswith(".json"):
+    for key in artifact_keys:
+        payload = get_json_by_key(key)
+        if payload is None:
             continue
-        with open(os.path.join(artifact_root, file_name), "r", encoding="utf-8") as handle:
-            payload = json.load(handle)
         results.append(_deserialize_processed_result(payload))
     return results
 
 
 def _remove_cached_file(repo_name: str, rel_path: str) -> None:
-    artifact_path = _artifact_path(repo_name, rel_path)
-    if os.path.exists(artifact_path):
-        os.remove(artifact_path)
+    digest = hashlib.sha1(rel_path.encode("utf-8")).hexdigest()
+    delete_keys(f"repo:{repo_name}:api_artifact:{digest}")
 
     source_path = os.path.join(_source_dir(repo_name), rel_path.replace("/", os.sep))
     if os.path.exists(source_path):
@@ -389,7 +375,6 @@ def _materialize_outputs(
     pending_documents: List[Document] = []
     raw_call_records: List[Tuple[str, str, str]] = []
 
-    symbol_to_fqn: Dict[str, List[str]] = {}
     symbol_resolver = SymbolResolver()
     dataflow_by_file: Dict[str, Dict[str, Any]] = {}
     async_patterns_by_file: Dict[str, Dict[str, Any]] = {}
@@ -443,12 +428,6 @@ def _materialize_outputs(
         for caller_name, callee_symbol in result.get("raw_calls", []):
             raw_call_records.append((prefixed_rel_path, caller_name, callee_symbol))
 
-        for chunk in result.get("chunks", []):
-            name = chunk.get("name")
-            node_type = chunk.get("node_type") or ""
-            if name and any(token in str(node_type).lower() for token in ("function", "method", "class")):
-                symbol_to_fqn.setdefault(name, []).append(f"{prefixed_rel_path}:{name}")
-
         pending_documents.extend(result.get("documents", []))
         if len(pending_documents) >= EMBED_BATCH_SIZE:
             flush_document_batch()
@@ -462,11 +441,13 @@ def _materialize_outputs(
         print("No documents to embed; aborting API ingestion.")
         return None
 
+    symbol_lookup = _build_symbol_name_lookup(symbol_resolver)
+
     for rel_path, caller_name, callee_symbol in raw_call_records:
-        caller_fqn = f"{rel_path}:{caller_name}"
-        candidates = symbol_to_fqn.get(callee_symbol) or []
-        callee_fqn = candidates[0] if candidates else callee_symbol
-        call_graph.setdefault(caller_fqn, set()).add(callee_fqn)
+        caller_fqn = _resolve_call_graph_symbol_fqn(symbol_lookup, rel_path, caller_name)
+        callee_fqn = _resolve_call_graph_symbol_fqn(symbol_lookup, rel_path, callee_symbol)
+        if caller_fqn and callee_fqn:
+            call_graph.setdefault(caller_fqn, set()).add(callee_fqn)
 
     symbol_metadata = _build_symbol_metadata(symbol_resolver)
     boot_chain = _build_boot_chain(call_graph, symbol_metadata, repo_name)
@@ -493,17 +474,11 @@ def _materialize_outputs(
         }
 
     os.makedirs(paths["data_dir"], exist_ok=True)
-    with open(paths["callgraph_path"], "w", encoding="utf-8") as handle:
-        json.dump(call_graph_for_kg, handle, indent=2, ensure_ascii=False)
-
-    with open(paths["bootchain_path"], "w", encoding="utf-8") as handle:
-        json.dump(boot_chain, handle, indent=2, ensure_ascii=False)
-
-    with open(paths["corestructures_path"], "w", encoding="utf-8") as handle:
-        json.dump(core_structures, handle, indent=2, ensure_ascii=False)
+    save_json(repo_name, "call_graph", call_graph_for_kg)
+    save_json(repo_name, "boot_chain", boot_chain)
+    save_json(repo_name, "core_structures", core_structures)
 
     symbol_resolver.build_cross_references()
-    symbol_table_path = os.path.join(paths["data_dir"], "symbol_table.json")
     symbol_data = {
         "global_index": symbol_resolver.export_cross_reference_graph(),
         "file_symbols": {
@@ -511,19 +486,13 @@ def _materialize_outputs(
             for file_path, symbol_table in symbol_resolver.symbol_tables.items()
         },
     }
-    with open(symbol_table_path, "w", encoding="utf-8") as handle:
-        json.dump(symbol_data, handle, indent=2, ensure_ascii=False)
+    save_json(repo_name, "symbol_table", symbol_data)
 
-    dataflow_path = os.path.join(paths["data_dir"], "dataflow_analysis.json")
-    with open(dataflow_path, "w", encoding="utf-8") as handle:
-        json.dump(dataflow_by_file, handle, indent=2, ensure_ascii=False)
+    save_json(repo_name, "dataflow_analysis", dataflow_by_file)
+    save_json(repo_name, "async_patterns", async_patterns_by_file)
 
-    async_patterns_path = os.path.join(paths["data_dir"], "async_patterns.json")
-    with open(async_patterns_path, "w", encoding="utf-8") as handle:
-        json.dump(async_patterns_by_file, handle, indent=2, ensure_ascii=False)
-
-    kg_path = os.path.join(paths["data_dir"], "knowledge_graph.json")
-    kg_builder.export(kg_path)
+    kg_data = kg_builder.export()
+    save_json(repo_name, "knowledge_graph", kg_data)
 
     os.makedirs(paths["vector_dir"], exist_ok=True)
     vectorstore.save_local(paths["vector_dir"])

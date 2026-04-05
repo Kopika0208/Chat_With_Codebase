@@ -1,5 +1,7 @@
 # semantic_analyzer.py - Unified semantic analysis for all languages via Tree-sitter
 
+import threading
+from functools import lru_cache
 from typing import Dict, List, Tuple, Optional, Any, Callable
 from .symbols import SymbolTable, TypeInfo, Symbol
 
@@ -15,6 +17,46 @@ except Exception:
     _HAS_TREE_SITTER = False
     Node = Any
     Language = Any
+
+
+_THREAD_LOCAL = threading.local()
+
+
+@lru_cache(maxsize=None)
+def _get_cached_language(language_name: str):
+    if not _HAS_TS_LANGS:
+        return None
+    try:
+        return get_language(language_name)
+    except Exception:
+        return None
+
+
+def _get_thread_local_parser(language_name: str):
+    if not _HAS_TREE_SITTER:
+        return None
+
+    parser_cache = getattr(_THREAD_LOCAL, "parsers", None)
+    if parser_cache is None:
+        parser_cache = {}
+        _THREAD_LOCAL.parsers = parser_cache
+
+    parser = parser_cache.get(language_name)
+    if parser is not None:
+        return parser
+
+    lang_obj = _get_cached_language(language_name)
+    if lang_obj is None:
+        return None
+
+    try:
+        parser = Parser()
+        parser.set_language(lang_obj)
+    except Exception:
+        return None
+
+    parser_cache[language_name] = parser
+    return parser
 
 
 class TreeSitterSemanticAnalyzer:
@@ -131,9 +173,9 @@ class TreeSitterSemanticAnalyzer:
         # Initialize Tree-sitter if available
         if _HAS_TREE_SITTER and self.language in self.LANGUAGE_CONFIG:
             try:
-                self.parser = Parser()
-                lang_obj = get_language(self.language)
-                self.parser.set_language(lang_obj)
+                self.parser = _get_thread_local_parser(self.language)
+                if self.parser is None:
+                    raise RuntimeError("Parser unavailable")
                 self.tree = self.parser.parse(self.source_bytes)
             except Exception:
                 self.parser = None

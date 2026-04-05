@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from backend.deps import PROJECT_ROOT, list_repos, get_repo_summary, clear_repo_cache
+from redis_storage import delete_repo as delete_repo_data
 
 router = APIRouter(prefix="/api/repos", tags=["repos"])
 
@@ -63,11 +64,13 @@ def delete_repo(repo_name: str):
         else:
             missing_paths.append(target_path)
 
+    redis_deleted = delete_repo_data(repo_name)
     clear_repo_cache(repo_name)
 
     return {
         "message": f"Repository '{repo_name}' deleted successfully",
         "repo_name": repo_name,
+        "redis_keys_deleted": redis_deleted,
         "deleted_paths": deleted_paths,
         "missing_paths": missing_paths,
     }

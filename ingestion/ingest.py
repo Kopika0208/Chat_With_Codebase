@@ -1,8 +1,10 @@
 # ingest.py - Main ingestion pipeline orchestrator
 
 import gc
+import ast
 import json
 import os
+import tempfile
 import time
 from datetime import datetime
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -50,6 +52,11 @@ except ImportError:
     extract_contributions = None
 
 try:
+    from redis_storage import save_json
+except ImportError:
+    save_json = None
+
+try:
     from .chunking import EXT_TO_TS_LANG, Document
 except ImportError:
     EXT_TO_TS_LANG = {}
@@ -76,6 +83,40 @@ try:
     from .zip_ingestion import download_and_extract_repo
 except ImportError:
     download_and_extract_repo = None
+
+
+def _build_symbol_name_lookup(symbol_resolver: SymbolResolver) -> Dict[str, Dict[Any, List[str]]]:
+    """Build lightweight indexes from symbol tables to canonical symbol FQNs."""
+    by_name: Dict[str, List[str]] = {}
+    by_file_and_name: Dict[tuple, List[str]] = {}
+
+    for file_path, symbol_table in symbol_resolver.symbol_tables.items():
+        for fqn, symbol in symbol_table.all_symbols.items():
+            by_name.setdefault(symbol.name, []).append(fqn)
+            by_file_and_name.setdefault((file_path, symbol.name), []).append(fqn)
+
+    return {
+        "by_name": by_name,
+        "by_file_and_name": by_file_and_name,
+    }
+
+
+def _resolve_call_graph_symbol_fqn(
+    symbol_lookup: Dict[str, Dict[Any, List[str]]],
+    file_path: str,
+    symbol_name: str,
+) -> Optional[str]:
+    """Resolve a caller/callee name to the canonical FQN used by the symbol table."""
+    if not symbol_name:
+        return None
+
+    candidates = list(symbol_lookup["by_file_and_name"].get((file_path, symbol_name), []))
+    if not candidates:
+        candidates = list(symbol_lookup["by_name"].get(symbol_name, []))
+    if not candidates:
+        return None
+
+    return candidates[0]
 
 try:
     from .github_loader import get_repo_metadata
@@ -721,20 +762,27 @@ def _process_repo_file(
         "used_parser": "unknown",
     }
 
+    python_tree = None
+    if ext == ".py":
+        try:
+            python_tree = ast.parse(content)
+        except Exception:
+            python_tree = None
+
     if ext in SUPPORTED_ANALYSIS_EXTENSIONS:
         if extract_symbols_unified:
-            result["symbol_table"] = extract_symbols_unified(prefixed_rel_path, content)
+            result["symbol_table"] = extract_symbols_unified(prefixed_rel_path, content, tree=python_tree)
 
         if ext == ".py" and extract_function_dataflow:
-            result["dataflow_analysis"] = extract_function_dataflow(prefixed_rel_path, content)
+            result["dataflow_analysis"] = extract_function_dataflow(prefixed_rel_path, content, tree=python_tree)
 
         if ext == ".py" and extract_async_patterns:
-            result["async_analysis"] = extract_async_patterns(prefixed_rel_path, content)
+            result["async_analysis"] = extract_async_patterns(prefixed_rel_path, content, tree=python_tree)
 
         if extract_calls_unified:
-            result["raw_calls"] = extract_calls_unified(content, ext)
+            result["raw_calls"] = extract_calls_unified(content, ext, tree=python_tree)
 
-    chunks = extract_chunks(content, ext)
+    chunks = extract_chunks(content, ext, syntax_tree=python_tree)
     result["chunks"] = chunks
     result["used_parser"] = chunks[0].get("parser_used") if chunks else "unknown"
 
@@ -781,6 +829,98 @@ def _drain_completed_futures(futures, max_items: Optional[int] = None):
             yield file_path, future
             if max_items is not None and emitted >= max_items:
                 return
+
+
+def _download_github_repo_parallel(
+    owner: str,
+    repo: str,
+    branch: str,
+    token: Optional[str],
+    destination_root: str,
+    verbose: bool = False,
+) -> Dict[str, int]:
+    """Fetch supported GitHub files into a temp directory using bounded parallelism."""
+    from .api_ingestion import _path_is_supported
+    from .github_loader import get_file_content, get_repo_tree
+    import requests
+
+    os.makedirs(destination_root, exist_ok=True)
+    session = requests.Session()
+    files_to_fetch = get_repo_tree(owner, repo, branch, token=token, session=session)
+
+    stats = {
+        "discovered": len(files_to_fetch),
+        "eligible": 0,
+        "downloaded": 0,
+        "skipped": 0,
+        "failed": 0,
+    }
+
+    eligible_entries = []
+    for file_entry in files_to_fetch:
+        rel_path = file_entry.get("path")
+        if not rel_path:
+            continue
+        if not _path_is_supported(rel_path, file_entry.get("size")):
+            stats["skipped"] += 1
+            continue
+        eligible_entries.append(file_entry)
+
+    stats["eligible"] = len(eligible_entries)
+
+    def _entry_priority(entry: Dict[str, Any]):
+        rel_path = (entry.get("path") or "").lower()
+        base_name = os.path.basename(rel_path)
+        important_names = (
+            "main.py", "app.py", "__main__.py", "index.js", "main.js", "app.js",
+            "package.json", "pyproject.toml", "setup.py", "manage.py", "dockerfile",
+            "requirements.txt", "tsconfig.json", "vite.config.ts", "next.config.js",
+        )
+        priority = 2
+        if base_name in important_names:
+            priority = 0
+        elif any(token in rel_path for token in ("config", "settings", "routes", "server", "entry", "main", "app")):
+            priority = 1
+        return (priority, int(entry.get("size") or 0), rel_path)
+
+    def worker(file_entry: Dict[str, Any]) -> bool:
+        rel_path = file_entry.get("path")
+        if not rel_path:
+            return False
+
+        temp_full_path = os.path.join(destination_root, rel_path)
+        os.makedirs(os.path.dirname(temp_full_path), exist_ok=True)
+        content = get_file_content(owner, repo, rel_path, branch, token=token)
+        with open(temp_full_path, "w", encoding="utf-8") as handle:
+            handle.write(content)
+        return True
+
+    futures = {}
+    max_workers = max(1, min(FILE_WORKERS, 8))
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        def submit_more():
+            while len(futures) < MAX_IN_FLIGHT_FILES:
+                try:
+                    next_entry = next(entry_iter)
+                except StopIteration:
+                    break
+                futures[executor.submit(worker, next_entry)] = next_entry.get("path")
+
+        entry_iter = iter(sorted(eligible_entries, key=_entry_priority))
+        submit_more()
+        while futures:
+            for rel_path, future in _drain_completed_futures(futures, max_items=1):
+                try:
+                    if future.result():
+                        stats["downloaded"] += 1
+                except Exception as exc:
+                    stats["failed"] += 1
+                    if verbose:
+                        print(f"[API] Failed to fetch {rel_path}: {exc}")
+                submit_more()
+
+    return stats
 
 
 def ingest_repo(
@@ -839,46 +979,23 @@ def ingest_repo(
             # API ingestion (default)
             if owner and repo:
                 try:
-                    from .github_loader import get_repo_tree, get_file_content
-                    
                     print(f"\n[API] Fetching {owner}/{repo} ({default_branch})...")
                     repo_path = tempfile.mkdtemp(prefix=f"{repo}_")
                     zip_cleanup_root = repo_path
-                    
-                    files_to_fetch = get_repo_tree(owner, repo, default_branch, token=github_token)
-                    print(f"[API] Found {len(files_to_fetch)} files, downloading...")
-                    
-                    fetched_count = 0
-                    skipped_count = 0
-                    failed_count = 0
-                    
-                    # Import path-only filter from api_ingestion (doesn't need file on disk)
-                    from .api_ingestion import _path_is_supported
-                    
-                    for file_entry in files_to_fetch:
-                        file_path = file_entry.get("path")
-                        if not file_path:
-                            continue
-                        
-                        # Filter by path/extension/size BEFORE downloading
-                        # (should_skip needs the file on disk; _path_is_supported does not)
-                        if not _path_is_supported(file_path, file_entry.get("size")):
-                            skipped_count += 1
-                            continue
-                        
-                        temp_full_path = os.path.join(repo_path, file_path)
-                        os.makedirs(os.path.dirname(temp_full_path), exist_ok=True)
-                        try:
-                            content = get_file_content(owner, repo, file_path, default_branch, token=github_token)
-                            with open(temp_full_path, "w", encoding="utf-8") as f:
-                                f.write(content)
-                            fetched_count += 1
-                        except Exception as e:
-                            failed_count += 1
-                            if verbose:
-                                print(f"[API] Failed to fetch {file_path}: {e}")
-                    
-                    print(f"[API] Downloaded {fetched_count} files (skipped {skipped_count}, failed {failed_count})")
+
+                    download_stats = _download_github_repo_parallel(
+                        owner,
+                        repo,
+                        default_branch,
+                        github_token,
+                        repo_path,
+                        verbose=verbose,
+                    )
+                    print(
+                        f"[API] Downloaded {download_stats['downloaded']} files "
+                        f"(eligible {download_stats['eligible']}, skipped {download_stats['skipped']}, "
+                        f"failed {download_stats['failed']})"
+                    )
                     ingestion_method = "API"
                 except Exception as e:
                     print(f"[API] Failed: {e}")
@@ -916,7 +1033,6 @@ def ingest_repo(
     pending_documents: List[Document] = []
     raw_call_records: List[tuple] = []
 
-    symbol_to_fqn = {}
     symbol_resolver = SymbolResolver()
     dataflow_by_file: Dict[str, Dict[str, Any]] = {}
     async_patterns_by_file: Dict[str, Dict[str, Any]] = {}
@@ -990,12 +1106,6 @@ def ingest_repo(
 
         for caller_name, callee_symbol in result.get("raw_calls", []):
             raw_call_records.append((prefixed_rel_path, caller_name, callee_symbol))
-
-        for chunk in result.get("chunks", []):
-            name = chunk.get("name")
-            node_type = chunk.get("node_type") or ""
-            if name and any(token in str(node_type).lower() for token in ("function", "method", "class")):
-                symbol_to_fqn.setdefault(name, []).append(f"{prefixed_rel_path}:{name}")
 
         pending_documents.extend(result.get("documents", []))
         if len(pending_documents) >= EMBED_BATCH_SIZE:
@@ -1075,24 +1185,14 @@ def ingest_repo(
             }
         return
 
+    symbol_lookup = _build_symbol_name_lookup(symbol_resolver)
+
     for rel_path, caller_name, callee_symbol in raw_call_records:
-        caller_fqn = f"{rel_path}:{caller_name}"
-        candidates = symbol_to_fqn.get(callee_symbol) or []
-        
-        # Prefer same-file callee (most likely internal call)
-        callee_fqn = None
-        for candidate in candidates:
-            if candidate.startswith(f"{rel_path}:"):
-                callee_fqn = candidate
-                break
-        
-        # Fall back to first candidate if no same-file match
-        if not callee_fqn and candidates:
-            callee_fqn = candidates[0]
-        
-        # Only add to call_graph if we resolved to a repo symbol
-        # Skip unresolved external names (len, strip, etc.)
-        if callee_fqn and ":" in callee_fqn:
+        caller_fqn = _resolve_call_graph_symbol_fqn(symbol_lookup, rel_path, caller_name)
+        callee_fqn = _resolve_call_graph_symbol_fqn(symbol_lookup, rel_path, callee_symbol)
+
+        # Only add repo-internal edges that resolve to canonical symbol ids.
+        if caller_fqn and callee_fqn:
             call_graph.setdefault(caller_fqn, set()).add(callee_fqn)
 
     symbol_metadata = _build_symbol_metadata(symbol_resolver)
@@ -1185,20 +1285,16 @@ def ingest_repo(
     os.makedirs(paths["data_dir"], exist_ok=True)
 
     call_graph_serializable = {caller: list(callees) for caller, callees in call_graph.items()}
-    with open(paths["callgraph_path"], "w", encoding="utf-8") as handle:
-        json.dump(call_graph_serializable, handle, indent=2, ensure_ascii=False)
-    print(f"Saved call graph to `{paths['callgraph_path']}` with {len(call_graph_serializable)} caller nodes.")
+    save_json(repo_name, "call_graph", call_graph_serializable)
+    print(f"Saved call graph for {repo_name} with {len(call_graph_serializable)} caller nodes.")
 
-    with open(paths["bootchain_path"], "w", encoding="utf-8") as handle:
-        json.dump(boot_chain, handle, indent=2, ensure_ascii=False)
-    print(f"Saved boot chain to `{paths['bootchain_path']}` with {len(boot_chain.get('ordered_steps', []))} ordered step(s).")
+    save_json(repo_name, "boot_chain", boot_chain)
+    print(f"Saved boot chain for {repo_name} with {len(boot_chain.get('ordered_steps', []))} ordered step(s).")
 
-    with open(paths["corestructures_path"], "w", encoding="utf-8") as handle:
-        json.dump(core_structures, handle, indent=2, ensure_ascii=False)
-    print(f"Saved core structures to `{paths['corestructures_path']}` with {len(core_structures.get('structures', []))} ranked structure(s).")
+    save_json(repo_name, "core_structures", core_structures)
+    print(f"Saved core structures for {repo_name} with {len(core_structures.get('structures', []))} ranked structure(s).")
 
     symbol_resolver.build_cross_references()
-    symbol_table_path = os.path.join(paths["data_dir"], "symbol_table.json")
     symbol_data = {
         "global_index": symbol_resolver.export_cross_reference_graph(),
         "file_symbols": {
@@ -1206,19 +1302,15 @@ def ingest_repo(
             for file_path, symbol_table in symbol_resolver.symbol_tables.items()
         },
     }
-    with open(symbol_table_path, "w", encoding="utf-8") as handle:
-        json.dump(symbol_data, handle, indent=2, ensure_ascii=False)
+    save_json(repo_name, "symbol_table", symbol_data)
     print(
-        f"Saved symbol table to `{symbol_table_path}` with "
+        f"Saved symbol table for {repo_name} with "
         f"{sum(len(st.all_symbols) for st in symbol_resolver.symbol_tables.values())} total symbols."
     )
 
-    dataflow_path = os.path.join(paths["data_dir"], "dataflow_analysis.json")
-    with open(dataflow_path, "w", encoding="utf-8") as handle:
-        json.dump(dataflow_by_file, handle, indent=2, ensure_ascii=False)
-
+    save_json(repo_name, "dataflow_analysis", dataflow_by_file)
     total_functions_analyzed = sum(len(funcs) for funcs in dataflow_by_file.values())
-    print(f"Saved data flow analysis for {total_functions_analyzed} functions to `{dataflow_path}`")
+    print(f"Saved data flow analysis for {repo_name} with {total_functions_analyzed} functions")
 
     total_def_use_chains = sum(
         len(func_analysis.get("def_use_chains", {}))
@@ -1227,24 +1319,20 @@ def ingest_repo(
     )
     print(f"Tracked {total_def_use_chains} definition-use chains across all functions")
 
-    async_patterns_path = os.path.join(paths["data_dir"], "async_patterns.json")
-    with open(async_patterns_path, "w", encoding="utf-8") as handle:
-        json.dump(async_patterns_by_file, handle, indent=2, ensure_ascii=False)
+    save_json(repo_name, "async_patterns", async_patterns_by_file)
     total_async_patterns = sum(
         entry.get("pattern_count", 0)
         for entry in async_patterns_by_file.values()
         if isinstance(entry, dict)
     )
-    print(f"Saved async pattern analysis with {total_async_patterns} pattern(s) to `{async_patterns_path}`")
+    print(f"Saved async pattern analysis for {repo_name} with {total_async_patterns} pattern(s)")
 
-    kg_path = os.path.join(paths["data_dir"], "knowledge_graph.json")
-    kg_builder.export(kg_path)
+    kg_data = kg_builder.export()
+    save_json(repo_name, "knowledge_graph", kg_data)
 
     if contributions_data:
-        contributions_path = os.path.join(paths["data_dir"], "contributions.json")
-        with open(contributions_path, "w", encoding="utf-8") as handle:
-            json.dump(contributions_data, handle, indent=2, ensure_ascii=False, default=str)
-        print(f"Saved contributions data to `{contributions_path}`")
+        save_json(repo_name, "contributions", contributions_data)
+        print(f"Saved contributions data for {repo_name}")
 
     os.makedirs(paths["vector_dir"], exist_ok=True)
     vectorstore.save_local(paths["vector_dir"])
@@ -1260,10 +1348,8 @@ def ingest_repo(
         core_structures=core_structures,
         kg_builder=kg_builder,
     )
-    documentation_path = os.path.join(paths["data_dir"], "documentation.json")
-    with open(documentation_path, "w", encoding="utf-8") as handle:
-        json.dump(documentation, handle, indent=2, ensure_ascii=False)
-    print(f"Saved onboarding documentation to `{documentation_path}`")
+    save_json(repo_name, "documentation", documentation)
+    print(f"Saved onboarding documentation for {repo_name}")
 
     if compute_health_payload:
         try:
@@ -1272,10 +1358,8 @@ def ingest_repo(
                 _make_json_safe(call_graph),
                 _make_json_safe(symbol_data),
             )
-            health_path = os.path.join(paths["data_dir"], "code_health.json")
-            with open(health_path, "w", encoding="utf-8") as handle:
-                json.dump(health_payload, handle, indent=2, ensure_ascii=False, default=str)
-            print(f"Saved code health analysis to `{health_path}`")
+            save_json(repo_name, "code_health", health_payload)
+            print(f"Saved code health analysis for {repo_name}")
         except Exception as exc:
             print(f"Warning: failed to precompute code health for {repo_name}: {exc}")
     
@@ -1483,8 +1567,7 @@ def ingest_repos(
     aggregated_paths = _get_repo_paths(None)
     os.makedirs(aggregated_paths["data_dir"], exist_ok=True)
 
-    with open(aggregated_paths["callgraph_path"], "w", encoding="utf-8") as handle:
-        json.dump({caller: list(callees) for caller, callees in all_call_graphs.items()}, handle, indent=2, ensure_ascii=False)
+    save_json("aggregated", "call_graph", {caller: list(callees) for caller, callees in all_call_graphs.items()})
     print(f"Saved aggregated call graph with {len(all_call_graphs)} caller nodes.")
 
     aggregated_boot_chain = {
@@ -1492,8 +1575,7 @@ def ingest_repos(
         "repositories": all_boot_chains,
         "summary": f"Boot chain data preserved for {len(all_boot_chains)} repository/repositories.",
     }
-    with open(aggregated_paths["bootchain_path"], "w", encoding="utf-8") as handle:
-        json.dump(aggregated_boot_chain, handle, indent=2, ensure_ascii=False)
+    save_json("aggregated", "boot_chain", aggregated_boot_chain)
     print(f"Saved aggregated boot chain metadata for {len(all_boot_chains)} repositories.")
 
     aggregated_core_structures = {
@@ -1501,11 +1583,9 @@ def ingest_repos(
         "repositories": all_core_structures,
         "summary": f"Core structure data preserved for {len(all_core_structures)} repository/repositories.",
     }
-    with open(aggregated_paths["corestructures_path"], "w", encoding="utf-8") as handle:
-        json.dump(aggregated_core_structures, handle, indent=2, ensure_ascii=False)
+    save_json("aggregated", "core_structures", aggregated_core_structures)
     print(f"Saved aggregated core-structure metadata for {len(all_core_structures)} repositories.")
 
-    symbol_table_path = os.path.join(aggregated_paths["data_dir"], "symbol_table.json")
     symbol_data = {
         "global_index": aggregated_symbol_resolver.export_cross_reference_graph(),
         "file_symbols": {
@@ -1513,31 +1593,24 @@ def ingest_repos(
             for file_path, symbol_table in aggregated_symbol_resolver.symbol_tables.items()
         },
     }
-    with open(symbol_table_path, "w", encoding="utf-8") as handle:
-        json.dump(symbol_data, handle, indent=2, ensure_ascii=False)
+    save_json("aggregated", "symbol_table", symbol_data)
     print(
         f"Saved aggregated symbol table with "
         f"{sum(len(st.all_symbols) for st in aggregated_symbol_resolver.symbol_tables.values())} total symbols."
     )
 
-    dataflow_path = os.path.join(aggregated_paths["data_dir"], "dataflow_analysis.json")
-    with open(dataflow_path, "w", encoding="utf-8") as handle:
-        json.dump(all_dataflow, handle, indent=2, ensure_ascii=False)
+    save_json("aggregated", "dataflow_analysis", all_dataflow)
     print("Saved aggregated data flow analysis.")
 
-    async_patterns_path = os.path.join(aggregated_paths["data_dir"], "async_patterns.json")
-    with open(async_patterns_path, "w", encoding="utf-8") as handle:
-        json.dump(all_async_patterns, handle, indent=2, ensure_ascii=False)
+    save_json("aggregated", "async_patterns", all_async_patterns)
     print("Saved aggregated async pattern analysis.")
 
-    kg_path = os.path.join(aggregated_paths["data_dir"], "knowledge_graph.json")
-    aggregated_kg.export(kg_path)
+    kg_data = aggregated_kg.export()
+    save_json("aggregated", "knowledge_graph", kg_data)
     print(f"Saved aggregated knowledge graph with {len(aggregated_kg.graph.nodes)} nodes and {len(aggregated_kg.graph.edges)} edges.")
 
     if all_contributions:
-        contributions_path = os.path.join(aggregated_paths["data_dir"], "contributions.json")
-        with open(contributions_path, "w", encoding="utf-8") as handle:
-            json.dump(all_contributions, handle, indent=2, ensure_ascii=False, default=str)
+        save_json("aggregated", "contributions", all_contributions)
         print(f"Saved aggregated contributions data from {len(all_contributions)} repositories.")
 
     os.makedirs(aggregated_paths["vector_dir"], exist_ok=True)

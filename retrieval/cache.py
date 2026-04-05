@@ -13,6 +13,8 @@ from langchain_groq import ChatGroq
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
 
+from redis_storage import get_json, repo_exists
+
 from query_understanding import QueryUnderstanding
 from unified_retrieval import UnifiedRetriever
 
@@ -56,21 +58,17 @@ def get_repo_paths(repo_name: str):
 # ======================================================
 @st.cache_data(show_spinner=False)
 def load_call_graph_cached(repo_name: str):
-    paths = get_repo_paths(repo_name)
-    if not os.path.exists(paths["callgraph"]):
+    if not repo_exists(repo_name, "call_graph"):
         return None
-    with open(paths["callgraph"], "r", encoding="utf-8") as f:
-        return json.load(f)
+    return get_json(repo_name, "call_graph") or None
 
 
 @st.cache_data(show_spinner=False)
 def load_boot_chain_cached(repo_name: str):
-    paths = get_repo_paths(repo_name)
-    if not os.path.exists(paths["bootchain"]):
+    if not repo_exists(repo_name, "boot_chain"):
         return {}
     try:
-        with open(paths["bootchain"], "r", encoding="utf-8") as f:
-            return json.load(f)
+        return get_json(repo_name, "boot_chain") or {}
     except Exception as e:
         print(f"⚠️ Failed to load boot chain for {repo_name}: {e}")
         return {}
@@ -78,12 +76,10 @@ def load_boot_chain_cached(repo_name: str):
 
 @st.cache_data(show_spinner=False)
 def load_core_structures_cached(repo_name: str):
-    paths = get_repo_paths(repo_name)
-    if not os.path.exists(paths["corestructures"]):
+    if not repo_exists(repo_name, "core_structures"):
         return {}
     try:
-        with open(paths["corestructures"], "r", encoding="utf-8") as f:
-            return json.load(f)
+        return get_json(repo_name, "core_structures") or {}
     except Exception as e:
         print(f"Failed to load core structures for {repo_name}: {e}")
         return {}
@@ -91,12 +87,10 @@ def load_core_structures_cached(repo_name: str):
 
 @st.cache_data(show_spinner=False)
 def load_knowledge_graph_cached(repo_name: str):
-    paths = get_repo_paths(repo_name)
-    if not os.path.exists(paths["knowledge"]):
+    if not repo_exists(repo_name, "knowledge_graph"):
         return {}
     try:
-        with open(paths["knowledge"], "r", encoding="utf-8") as f:
-            return json.load(f)
+        return get_json(repo_name, "knowledge_graph") or {}
     except Exception as e:
         print(f"⚠️ Failed to load KG for {repo_name}: {e}")
         return {}
@@ -104,12 +98,13 @@ def load_knowledge_graph_cached(repo_name: str):
 
 @st.cache_resource(show_spinner=False)
 def load_graph_traversal_cached(repo_name: str):
-    paths = get_repo_paths(repo_name)
-    kg_path = paths["knowledge"]
-    if not os.path.exists(kg_path):
+    if not repo_exists(repo_name, "knowledge_graph"):
         return None
     try:
-        return load_knowledge_graph(kg_path)
+        kg_data = get_json(repo_name, "knowledge_graph")
+        if not kg_data:
+            return None
+        return load_knowledge_graph(kg_data)
     except Exception as e:
         print(f"⚠️ Failed to load traversal for {repo_name}: {e}")
         return None
@@ -117,12 +112,10 @@ def load_graph_traversal_cached(repo_name: str):
 
 @st.cache_data(show_spinner=False)
 def load_symbol_table_cached(repo_name: str):
-    paths = get_repo_paths(repo_name)
-    if not os.path.exists(paths["symbol"]):
+    if not repo_exists(repo_name, "symbol_table"):
         return {}
     try:
-        with open(paths["symbol"], "r", encoding="utf-8") as f:
-            return json.load(f)
+        return get_json(repo_name, "symbol_table") or {}
     except Exception as e:
         print(f"⚠️ Failed to load symbol table for {repo_name}: {e}")
         return {}
@@ -130,12 +123,10 @@ def load_symbol_table_cached(repo_name: str):
 
 @st.cache_data(show_spinner=False)
 def load_dataflow_data_cached(repo_name: str):
-    paths = get_repo_paths(repo_name)
-    if not os.path.exists(paths["dataflow"]):
+    if not repo_exists(repo_name, "dataflow_analysis"):
         return {}
     try:
-        with open(paths["dataflow"], "r", encoding="utf-8") as f:
-            return json.load(f)
+        return get_json(repo_name, "dataflow_analysis") or {}
     except Exception as e:
         print(f"⚠️ Failed to load dataflow for {repo_name}: {e}")
         return {}
@@ -146,12 +137,10 @@ def load_dataflow_data_cached(repo_name: str):
 # ======================================================
 @st.cache_data(show_spinner=False)
 def load_async_patterns_cached(repo_name: str):
-    paths = get_repo_paths(repo_name)
-    if not os.path.exists(paths["asyncpatterns"]):
+    if not repo_exists(repo_name, "async_patterns"):
         return {}
     try:
-        with open(paths["asyncpatterns"], "r", encoding="utf-8") as f:
-            return json.load(f)
+        return get_json(repo_name, "async_patterns") or {}
     except Exception as e:
         print(f"Failed to load async patterns for {repo_name}: {e}")
         return {}
@@ -187,18 +176,21 @@ def get_llm():
 @st.cache_resource(show_spinner=False)
 def get_graph_rag_retriever(repo_name: str):
     try:
-        paths = get_repo_paths(repo_name)
         vectorstore = get_vectorstore(repo_name)
-
-        if not os.path.exists(paths["knowledge"]):
+        if not repo_exists(repo_name, "knowledge_graph"):
             print(f"[Graph-RAG] KG missing for {repo_name}")
+            return None
+
+        kg_data = get_json(repo_name, "knowledge_graph")
+        if not kg_data:
+            print(f"[Graph-RAG] KG payload missing for {repo_name}")
             return None
 
         all_documents = list(vectorstore.docstore._dict.values())
 
         retriever = create_graph_rag_retriever(
             vectorstore=vectorstore,
-            knowledge_graph_path=paths["knowledge"],
+            knowledge_graph_source=kg_data,
             documents=all_documents,
         )
 

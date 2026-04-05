@@ -11,6 +11,8 @@ from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
 from collections import defaultdict
 
+from redis_storage import get_json
+
 
 # ======================================================
 # 🔀 FUZZY AUTHOR MERGING (shared logic with contributions_viz.py)
@@ -173,13 +175,9 @@ class ContributionsDataAnalyzer:
         self._merged_authors = _merge_authors_from_data(raw_authors)
 
     def _load_contributions_data(self) -> Optional[Dict]:
-        """Load contributions.json for the repository."""
-        contributions_path = os.path.join("data", self.repo_name, "contributions.json")
+        """Load contributions data for the repository from Redis."""
         try:
-            if os.path.exists(contributions_path):
-                with open(contributions_path, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            return None
+            return get_json(self.repo_name, "contributions")
         except Exception as e:
             print(f"⚠️ Error loading contributions data: {e}")
             return None

@@ -459,8 +459,8 @@ function QueryPage({ selectedRepo, setSelectedRepo, repos }) {
               <div style={{ fontWeight: 600, color: "#fff", marginBottom: 12 }}>📊 Graph-RAG Stats</div>
               <div style={{ display: "flex", gap: 24 }}>
                 {[
-                  ["Anchor Nodes", result.graph_stats.initial_vector_results || result.graph_stats.anchor_nodes],
-                  ["Graph Expanded", result.graph_stats.total_nodes_visited],
+                  ["Anchor Nodes", result.graph_stats.anchor_nodes],
+                  ["Graph Expanded", result.graph_stats.expanded_nodes ?? result.graph_stats.total_nodes_visited],
                   ["Max Depth", result.graph_stats.max_depth_reached],
                   ["Final Docs", result.graph_stats.final_document_count],
                 ].map(([label, val]) => (
@@ -557,7 +557,7 @@ function CallGraphPage({ selectedRepo, setSelectedRepo, repos }) {
 
   // Simple force-directed-ish layout
   function layoutNodes(nodes) {
-    if (!nodes || !nodes.length) return [];
+    if (!nodes || !nodes.length) return { nodes: [], width: 0, height: 0 };
     const rows = {};
     nodes.forEach(n => {
       const type = n.type || "helper";
@@ -566,17 +566,43 @@ function CallGraphPage({ selectedRepo, setSelectedRepo, repos }) {
     });
     const typeOrder = ["entry", "core", "helper"];
     const laid = [];
-    let y = 30;
+    const canvasWidth = 1180;
+    const nodeWidth = 160;
+    const horizontalGap = 26;
+    const verticalGap = 78;
+    const maxPerRow = 5;
+    let y = 28;
+
     for (const type of typeOrder) {
       const group = rows[type] || [];
-      const totalWidth = group.length * 180;
-      const startX = Math.max(20, (800 - totalWidth) / 2);
-      group.forEach((n, i) => {
-        laid.push({ ...n, x: startX + i * 180, y, color: typeColors[type] || "#22c55e" });
+      if (!group.length) continue;
+
+      const chunkedRows = [];
+      for (let i = 0; i < group.length; i += maxPerRow) {
+        chunkedRows.push(group.slice(i, i + maxPerRow));
+      }
+
+      chunkedRows.forEach((row, rowIndex) => {
+        const totalWidth = row.length * nodeWidth + Math.max(0, row.length - 1) * horizontalGap;
+        const startX = Math.max(20, (canvasWidth - totalWidth) / 2);
+        row.forEach((n, i) => {
+          laid.push({
+            ...n,
+            x: startX + i * (nodeWidth + horizontalGap),
+            y: y + rowIndex * verticalGap,
+            color: typeColors[type] || "#22c55e",
+          });
+        });
       });
-      if (group.length) y += 110;
+
+      y += chunkedRows.length * verticalGap + 34;
     }
-    return laid;
+
+    return {
+      nodes: laid,
+      width: canvasWidth,
+      height: Math.max(520, y + 48),
+    };
   }
 
   return (
@@ -604,101 +630,104 @@ function CallGraphPage({ selectedRepo, setSelectedRepo, repos }) {
 
       {data && !loading && (
         <>
-          <Card style={{ padding: 0, overflow: "hidden", marginBottom: 18, minHeight: 460 }}>
-            <div style={{ position: "relative", height: 420, overflow: "auto", background: "rgba(0,0,0,0.25)" }}>
+          <Card style={{ padding: 0, overflow: "hidden", marginBottom: 18, minHeight: 640 }}>
+            <div style={{ position: "relative", height: 600, overflow: "auto", background: "rgba(0,0,0,0.25)" }}>
               {(() => {
-                const nodes = layoutNodes(data.nodes || []);
+                const layout = layoutNodes(data.nodes || []);
+                const nodes = layout.nodes;
                 const nodeMap = {};
                 nodes.forEach(n => { nodeMap[n.id] = n; });
                 const edges = (data.edges || []).filter(e => nodeMap[e.source] && nodeMap[e.target]);
 
                 return (
                   <>
-                    <svg width="100%" height="360" style={{ position: "absolute", top: 0, left: 0 }}>
-                      {edges.map((e, i) => {
-                        const s = nodeMap[e.source], t = nodeMap[e.target];
-                        if (!s || !t) return null;
-                        return <line key={i} x1={s.x + 70} y1={s.y + 18} x2={t.x + 70} y2={t.y + 18} stroke="rgba(79,142,247,0.35)" strokeWidth={1.5} strokeDasharray="4 3" />;
-                      })}
-                    </svg>
-                    {nodes.map(n => (
-                          <div key={n.id} onClick={() => setFocus(n.id)} style={{
-                            position: "absolute", left: n.x, top: n.y,
-                            background: n.color, color: "#fff", borderRadius: 8,
-                            padding: "8px 16px", fontSize: 12, fontWeight: 600,
-                            cursor: "pointer", whiteSpace: "nowrap", maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis",
-                            boxShadow: `0 0 16px ${n.color}44`, fontFamily: "'Fira Code', monospace",
-                          }} title={n.id}>{n.label}</div>
-                        ))}
-                      </>
-                    );
-                  })()}
-                </div>
-              </Card>
+                    <div style={{ position: "relative", width: layout.width, minHeight: layout.height }}>
+                      <svg width={layout.width} height={layout.height} style={{ position: "absolute", top: 0, left: 0 }}>
+                        {edges.map((e, i) => {
+                          const s = nodeMap[e.source], t = nodeMap[e.target];
+                          if (!s || !t) return null;
+                          return <line key={i} x1={s.x + 80} y1={s.y + 18} x2={t.x + 80} y2={t.y + 18} stroke="rgba(79,142,247,0.35)" strokeWidth={1.5} strokeDasharray="4 3" />;
+                        })}
+                      </svg>
+                      {nodes.map(n => (
+                        <div key={n.id} onClick={() => setFocus(n.id)} style={{
+                          position: "absolute", left: n.x, top: n.y,
+                          background: n.color, color: "#fff", borderRadius: 8,
+                          padding: "8px 16px", fontSize: 12, fontWeight: 600,
+                          cursor: "pointer", whiteSpace: "nowrap", width: 160, overflow: "hidden", textOverflow: "ellipsis",
+                          boxShadow: `0 0 16px ${n.color}44`, fontFamily: "'Fira Code', monospace", textAlign: "center",
+                        }} title={n.id}>{n.label}</div>
+                      ))}
+                    </div>
+                  </>
+                );
+              })()}
+            </div>
+          </Card>
 
-              <div style={{ display: "flex", gap: 10, alignItems: "center", margin: "0 0 16px" }}>
-                <span style={{ width: 13, height: 13, background: "#4f8ef7", borderRadius: 3, display: "inline-block" }} />
-                <span style={{ color: "#d1d5db", fontSize: 13 }}>entry</span>
-                <span style={{ width: 13, height: 13, background: "#a855f7", borderRadius: 3, display: "inline-block", marginLeft: 12 }} />
-                <span style={{ color: "#d1d5db", fontSize: 13 }}>core</span>
-                <span style={{ width: 13, height: 13, background: "#22c55e", borderRadius: 3, display: "inline-block", marginLeft: 12 }} />
-                <span style={{ color: "#d1d5db", fontSize: 13 }}>helper</span>
-              </div>
+          <div style={{ display: "flex", gap: 10, alignItems: "center", margin: "0 0 16px" }}>
+            <span style={{ width: 13, height: 13, background: "#4f8ef7", borderRadius: 3, display: "inline-block" }} />
+            <span style={{ color: "#d1d5db", fontSize: 13 }}>entry</span>
+            <span style={{ width: 13, height: 13, background: "#a855f7", borderRadius: 3, display: "inline-block", marginLeft: 12 }} />
+            <span style={{ color: "#d1d5db", fontSize: 13 }}>core</span>
+            <span style={{ width: 13, height: 13, background: "#22c55e", borderRadius: 3, display: "inline-block", marginLeft: 12 }} />
+            <span style={{ color: "#d1d5db", fontSize: 13 }}>helper</span>
+          </div>
 
-              {focus && data && (
-                <Card style={{ marginBottom: 20, background: "rgba(0,0,0,0.4)" }}>
-                  <h3 style={{ color: "#fff", margin: "10px 16px" }}>Focused function details</h3>
-                  {(() => {
-                    const functionNode = (data.nodes || []).find(n => n.id === focus);
-                    const inEdges = (data.edges || []).filter(e => e.target === focus);
-                    const outEdges = (data.edges || []).filter(e => e.source === focus);
-                    const parents = inEdges.map(e => e.source);
-                    const children = outEdges.map(e => e.target);
-                    return (
-                      <>
-                        <div style={{ display: "flex", gap: 20, padding: "0 16px 16px", flexWrap: "wrap" }}>
-                          <div style={{ minWidth: 250 }}>
-                            <p style={{ color: "#ccc", margin: "4px 0" }}><strong>ID:</strong> {functionNode?.id ?? focus}</p>
-                            <p style={{ color: "#ccc", margin: "4px 0" }}><strong>Name:</strong> {functionNode?.label ?? focus.split(':').pop()}</p>
-                            <p style={{ color: "#ccc", margin: "4px 0" }}><strong>Type:</strong> {functionNode?.type ?? "unknown"}</p>
-                            <p style={{ color: "#ccc", margin: "4px 0" }}><strong>File:</strong> {functionNode?.file ?? "unknown"}</p>
-                            <p style={{ color: "#ccc", margin: "4px 0" }}><strong>Incoming calls:</strong> {parents.length}</p>
-                            <p style={{ color: "#ccc", margin: "4px 0" }}><strong>Outgoing calls:</strong> {children.length}</p>
-                          </div>
-
-                          <div>
-                            <p style={{ color: "#fff", margin: "4px 0 8px" }}><strong>Callers (entry/core/help):</strong></p>
-                            <ul style={{ margin: 0, paddingLeft: 16, color: "#ddd" }}>
-                              {parents.length ? parents.map(parent => <li key={parent}>{parent.split(':').pop()}</li>) : <em>None</em>}
-                            </ul>
-                          </div>
-
-                          <div>
-                            <p style={{ color: "#fff", margin: "4px 0 8px" }}><strong>Callees (core/helper):</strong></p>
-                            <ul style={{ margin: 0, paddingLeft: 16, color: "#ddd" }}>
-                              {children.length ? children.map(child => <li key={child}>{child.split(':').pop()}</li>) : <em>None</em>}
-                            </ul>
-                          </div>
-                        </div>
-
-                        <div style={{ padding: "0 16px 16px" }}>
-                        <h4 style={{ color: "#fff", margin: "8px 0" }}>LLM summary</h4>
-                        {summaryLoading && <p style={{ color: "#9ca3af" }}>Generating summary...</p>}
-                        {summaryError && <p style={{ color: "#f87171" }}>Error: {summaryError}</p>}
-                        {!summaryLoading && !summaryError && summary && (
-                          <p style={{ color: "#d1d5db", margin: 0, whiteSpace: "pre-line" }}>{summary}</p>
-                        )}
-                        {!summaryLoading && !summaryError && !summary && (
-                          <p style={{ color: "#9ca3af", margin: 0 }}>Select a core function and wait for the LLM to explain it.</p>
-                        )}
+          {focus && data && (
+            <Card style={{ marginBottom: 20, background: "rgba(0,0,0,0.4)" }}>
+              <h3 style={{ color: "#fff", margin: "10px 16px" }}>Focused function details</h3>
+              {(() => {
+                const functionNode = (data.nodes || []).find(n => n.id === focus);
+                const inEdges = (data.edges || []).filter(e => e.target === focus);
+                const outEdges = (data.edges || []).filter(e => e.source === focus);
+                const parents = inEdges.map(e => e.source);
+                const children = outEdges.map(e => e.target);
+                return (
+                  <>
+                    <div style={{ display: "flex", gap: 20, padding: "0 16px 16px", flexWrap: "wrap" }}>
+                      <div style={{ minWidth: 250 }}>
+                        <p style={{ color: "#ccc", margin: "4px 0" }}><strong>ID:</strong> {functionNode?.id ?? focus}</p>
+                        <p style={{ color: "#ccc", margin: "4px 0" }}><strong>Name:</strong> {functionNode?.label ?? focus.split(':').pop()}</p>
+                        <p style={{ color: "#ccc", margin: "4px 0" }}><strong>Type:</strong> {functionNode?.type ?? "unknown"}</p>
+                        <p style={{ color: "#ccc", margin: "4px 0" }}><strong>File:</strong> {functionNode?.file ?? "unknown"}</p>
+                        <p style={{ color: "#ccc", margin: "4px 0" }}><strong>Incoming calls:</strong> {parents.length}</p>
+                        <p style={{ color: "#ccc", margin: "4px 0" }}><strong>Outgoing calls:</strong> {children.length}</p>
                       </div>
+
+                      <div>
+                        <p style={{ color: "#fff", margin: "4px 0 8px" }}><strong>Callers (entry/core/help):</strong></p>
+                        <ul style={{ margin: 0, paddingLeft: 16, color: "#ddd" }}>
+                          {parents.length ? parents.map(parent => <li key={parent}>{parent.split(':').pop()}</li>) : <em>None</em>}
+                        </ul>
+                      </div>
+
+                      <div>
+                        <p style={{ color: "#fff", margin: "4px 0 8px" }}><strong>Callees (core/helper):</strong></p>
+                        <ul style={{ margin: 0, paddingLeft: 16, color: "#ddd" }}>
+                          {children.length ? children.map(child => <li key={child}>{child.split(':').pop()}</li>) : <em>None</em>}
+                        </ul>
+                      </div>
+                    </div>
+
+                    <div style={{ padding: "0 16px 16px" }}>
+                      <h4 style={{ color: "#fff", margin: "8px 0" }}>LLM summary</h4>
+                      {summaryLoading && <p style={{ color: "#9ca3af" }}>Generating summary...</p>}
+                      {summaryError && <p style={{ color: "#f87171" }}>Error: {summaryError}</p>}
+                      {!summaryLoading && !summaryError && summary && (
+                        <p style={{ color: "#d1d5db", margin: 0, whiteSpace: "pre-line" }}>{summary}</p>
+                      )}
+                      {!summaryLoading && !summaryError && !summary && (
+                        <p style={{ color: "#9ca3af", margin: 0 }}>Select a core function and wait for the LLM to explain it.</p>
+                      )}
+                    </div>
                     </>
-                    );
-                  })()}
-                </Card>
-              )}
-            </>
+                );
+              })()}
+            </Card>
           )}
+        </>
+      )}
     </div>
   );
 }
@@ -976,6 +1005,12 @@ function OnboardContributions({ repo }) {
     return <Card><div style={{ textAlign: "center", color: "rgba(255,255,255,0.4)", padding: 32 }}>No contribution data available. Re-ingest the repository to enable contribution analysis.</div></Card>;
   }
 
+  const topAuthors = (data.authors || []).slice(0, 5);
+  const maxCommits = Math.max(...topAuthors.map(a => a.commits || 0), 1);
+  const maxFiles = Math.max(...topAuthors.map(a => a.files_changed || 0), 1);
+  const totalLinesAdded = topAuthors.reduce((sum, a) => sum + (a.lines_added || 0), 0);
+  const totalLinesDeleted = topAuthors.reduce((sum, a) => sum + (a.lines_deleted || 0), 0);
+
   return (
     <div>
       <div style={{ display: "flex", gap: 16, marginBottom: 24 }}>
@@ -983,9 +1018,90 @@ function OnboardContributions({ repo }) {
         <StatCard icon="📝" value={data.total_commits} label="Commits" />
       </div>
 
+      <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr", gap: 16, marginBottom: 18 }}>
+        <Card>
+          <div style={{ fontWeight: 600, color: "#fff", marginBottom: 16 }}>Top Contributors By Commits</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            {topAuthors.map((a, i) => (
+              <div key={a.name + i}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6, gap: 12 }}>
+                  <div style={{ color: "#fff", fontWeight: 600, minWidth: 0 }}>
+                    #{i + 1} {a.name}
+                  </div>
+                  <div style={{ color: "rgba(255,255,255,0.55)", fontSize: 12, whiteSpace: "nowrap" }}>
+                    {(a.commits || 0).toLocaleString()} commits
+                  </div>
+                </div>
+                <div style={{ background: "rgba(255,255,255,0.08)", borderRadius: 999, height: 12, overflow: "hidden" }}>
+                  <div style={{
+                    width: `${Math.max(8, Math.round(((a.commits || 0) / maxCommits) * 100))}%`,
+                    height: "100%",
+                    background: "linear-gradient(90deg, #4f8ef7 0%, #22c55e 100%)",
+                    borderRadius: 999,
+                  }} />
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, color: "rgba(255,255,255,0.4)", fontSize: 12 }}>
+                  <span>{(a.files_changed || 0).toLocaleString()} files changed</span>
+                  <span>{a.net_lines >= 0 ? "+" : ""}{(a.net_lines || 0).toLocaleString()} net lines</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+
+        <Card>
+          <div style={{ fontWeight: 600, color: "#fff", marginBottom: 16 }}>Top 5 Snapshot</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 12 }}>
+            <div style={{ background: "rgba(255,255,255,0.04)", borderRadius: 10, padding: 14 }}>
+              <div style={{ color: "rgba(255,255,255,0.45)", fontSize: 12, marginBottom: 6 }}>Shown Authors</div>
+              <div style={{ color: "#fff", fontSize: 28, fontWeight: 700 }}>{topAuthors.length}</div>
+            </div>
+            <div style={{ background: "rgba(255,255,255,0.04)", borderRadius: 10, padding: 14 }}>
+              <div style={{ color: "rgba(255,255,255,0.45)", fontSize: 12, marginBottom: 6 }}>Top Commit Share</div>
+              <div style={{ color: "#fff", fontSize: 28, fontWeight: 700 }}>
+                {Math.round(((topAuthors[0]?.commits || 0) / Math.max(data.total_commits || 1, 1)) * 100)}%
+              </div>
+            </div>
+            <div style={{ background: "rgba(255,255,255,0.04)", borderRadius: 10, padding: 14 }}>
+              <div style={{ color: "rgba(255,255,255,0.45)", fontSize: 12, marginBottom: 6 }}>Lines Added</div>
+              <div style={{ color: "#4ade80", fontSize: 28, fontWeight: 700 }}>+{totalLinesAdded.toLocaleString()}</div>
+            </div>
+            <div style={{ background: "rgba(255,255,255,0.04)", borderRadius: 10, padding: 14 }}>
+              <div style={{ color: "rgba(255,255,255,0.45)", fontSize: 12, marginBottom: 6 }}>Lines Deleted</div>
+              <div style={{ color: "#f87171", fontSize: 28, fontWeight: 700 }}>-{totalLinesDeleted.toLocaleString()}</div>
+            </div>
+          </div>
+
+          <div style={{ marginTop: 16 }}>
+            <div style={{ color: "rgba(255,255,255,0.55)", fontSize: 12, marginBottom: 8 }}>Files changed comparison</div>
+            {topAuthors.map((a, i) => (
+              <div key={`${a.name}-${i}-files`} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+                <span style={{ color: "rgba(255,255,255,0.7)", fontSize: 12, minWidth: 120, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                  {a.name}
+                </span>
+                <div style={{ flex: 1, background: "rgba(255,255,255,0.06)", height: 8, borderRadius: 999, overflow: "hidden" }}>
+                  <div style={{
+                    width: `${Math.max(6, Math.round(((a.files_changed || 0) / maxFiles) * 100))}%`,
+                    height: "100%",
+                    background: "#a855f7",
+                    borderRadius: 999,
+                  }} />
+                </div>
+                <span style={{ color: "rgba(255,255,255,0.45)", fontSize: 12, minWidth: 28, textAlign: "right" }}>
+                  {a.files_changed || 0}
+                </span>
+              </div>
+            ))}
+          </div>
+        </Card>
+      </div>
+
       <Card>
-        <div style={{ fontWeight: 600, color: "#fff", marginBottom: 16 }}>🏆 Contributors</div>
-        {data.authors.map((a, i) => (
+        <div style={{ fontWeight: 600, color: "#fff", marginBottom: 6 }}>🏆 Contributors</div>
+        <div style={{ color: "rgba(255,255,255,0.45)", fontSize: 12, marginBottom: 12 }}>
+          Showing top {topAuthors.length} contributor{topAuthors.length === 1 ? "" : "s"} by commit count
+        </div>
+        {topAuthors.map((a, i) => (
           <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 0", borderTop: "1px solid rgba(255,255,255,0.07)" }}>
             <div>
               <div style={{ fontWeight: 600, color: "#fff" }}>
@@ -993,8 +1109,13 @@ function OnboardContributions({ repo }) {
                 {a.emails && a.emails.length > 1 && <span style={{ fontSize: 11, color: "rgba(255,255,255,0.35)", marginLeft: 8 }}>(merged: {a.emails.length} accounts)</span>}
               </div>
               <div style={{ fontSize: 12, color: "rgba(255,255,255,0.35)", marginTop: 4 }}>
-                {a.commits} commits • {a.files_changed} files • {a.lines_added > 0 ? `+${a.lines_added.toLocaleString()}` : 0} / -{(a.lines_deleted || 0).toLocaleString()} lines
+                {(a.commits || 0).toLocaleString()} commits • {(a.files_changed || 0).toLocaleString()} files • {a.lines_added > 0 ? `+${a.lines_added.toLocaleString()}` : 0} / -{(a.lines_deleted || 0).toLocaleString()} lines
               </div>
+              {(a.first_commit || a.last_commit) && (
+                <div style={{ fontSize: 11, color: "rgba(255,255,255,0.28)", marginTop: 4 }}>
+                  Active {a.first_commit ? `from ${String(a.first_commit).slice(0, 10)}` : ""}{a.last_commit ? ` to ${String(a.last_commit).slice(0, 10)}` : ""}
+                </div>
+              )}
             </div>
             <div style={{ fontSize: 18, fontWeight: 700, color: a.net_lines >= 0 ? "#4ade80" : "#f87171" }}>
               {a.net_lines >= 0 ? "+" : ""}{(a.net_lines || 0).toLocaleString()}

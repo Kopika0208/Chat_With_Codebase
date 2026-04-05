@@ -5,16 +5,143 @@ from collections import defaultdict
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+import re
 
 import requests
 
 from .github_loader import GITHUB_API_BASE, GitHubAPIError, _build_headers
 from .ingest import _get_repo_paths
+from redis_storage import save_json
 
 
 MAX_COMMITS = 500
 MAX_DETAIL_COMMITS = 50
-MAX_CONTRIBUTORS = 20
+MAX_RAW_CONTRIBUTORS = 20  # Fetch more raw authors initially for merging
+MAX_FINAL_CONTRIBUTORS = 10  # Final limit after fuzzy merging
+MAX_WORKERS = 5
+TIMEOUT_SECONDS = 30
+COMMITS_PAGE_SIZE = 100
+DETAIL_DELAY_SECONDS = 0.15
+MIN_COMMITS_PER_CONTRIBUTOR = 2
+RATE_LIMIT_THRESHOLD = 25
+
+# ======================================================
+# Author merging functions (moved from backend router)
+# ======================================================
+
+def _normalize_name(name: str) -> str:
+    return re.sub(r'[^a-z0-9]', '', name.lower().strip())
+
+
+def _extract_name_parts(name: str) -> set:
+    tokens = re.split(r'[\s._\-@+]+', name.lower().strip())
+    parts = set()
+    for t in tokens:
+        if len(t) < 2 or t.isdigit():
+            continue
+        parts.add(t)
+        stripped = re.sub(r'\d+$', '', t)
+        if stripped and len(stripped) >= 2:
+            parts.add(stripped)
+    return parts
+
+
+def _names_match(a: str, b: str) -> bool:
+    na, nb = _normalize_name(a), _normalize_name(b)
+    if na == nb:
+        return True
+    if len(na) >= 3 and len(nb) >= 3 and (na in nb or nb in na):
+        return True
+    pa, pb = _extract_name_parts(a), _extract_name_parts(b)
+    if pa and pb and {t for t in (pa & pb) if len(t) >= 3}:
+        return True
+    return False
+
+
+def _get_display_name(data: dict, email: str) -> str:
+    for c in data.get("recent_commits", []):
+        n = c.get("author_name", "")
+        if n and " " in n:
+            return n
+    if data.get("recent_commits"):
+        return data["recent_commits"][0].get("author_name", email)
+    return email
+
+
+def _merge_authors(authors_raw: dict) -> list:
+    """Merge authors and return sorted list of {name, data} dicts."""
+    if not authors_raw:
+        return []
+
+    entries = []
+    for email, data in authors_raw.items():
+        display = _get_display_name(data, email)
+        all_names = {email, display}
+        for c in data.get("recent_commits", []):
+            n = c.get("author_name", "")
+            if n:
+                all_names.add(n)
+        entries.append((email, data, display, all_names))
+
+    groups, assigned = [], set()
+    for i, (_, _, _, names_i) in enumerate(entries):
+        if i in assigned:
+            continue
+        group = [i]
+        assigned.add(i)
+        for j, (_, _, _, names_j) in enumerate(entries):
+            if j in assigned:
+                continue
+            if any(_names_match(a, b) for a in names_i for b in names_j):
+                group.append(j)
+                assigned.add(j)
+        groups.append(group)
+
+    result = []
+    for group in groups:
+        merged = {
+            "commits": 0, "files_changed": 0,
+            "lines_added": 0, "lines_deleted": 0, "net_lines": 0,
+            "first_commit": None, "last_commit": None,
+            "recent_commits": [], "emails": [],
+        }
+        for idx in group:
+            email, data, _, _ = entries[idx]
+            merged["commits"] += data.get("commits", 0)
+            merged["files_changed"] += data.get("files_changed", 0)
+            merged["lines_added"] += data.get("lines_added", 0)
+            merged["lines_deleted"] += data.get("lines_deleted", 0)
+            merged["net_lines"] += data.get("net_lines", 0)
+            merged["emails"].append(email)
+            fc, lc = data.get("first_commit"), data.get("last_commit")
+            if fc and (not merged["first_commit"] or str(fc) < str(merged["first_commit"])):
+                merged["first_commit"] = fc
+            if lc and (not merged["last_commit"] or str(lc) > str(merged["last_commit"])):
+                merged["last_commit"] = lc
+            merged["recent_commits"].extend(data.get("recent_commits", []))
+
+        merged["recent_commits"] = sorted(
+            merged["recent_commits"], key=lambda c: c.get("date", ""), reverse=True
+        )[:5]
+
+        best_name = None
+        for idx in group:
+            if " " in entries[idx][2]:
+                best_name = entries[idx][2]
+                break
+        if not best_name:
+            best_name = entries[group[0]][2]
+
+        result.append({"name": best_name, **merged})
+
+    result.sort(key=lambda x: -x["commits"])
+    return result
+
+
+MAX_COMMITS = 500
+MAX_DETAIL_COMMITS = 50
+MAX_RAW_CONTRIBUTORS = 20  # Fetch more raw authors initially for merging
+MAX_FINAL_CONTRIBUTORS = 10  # Final limit after fuzzy merging
 MAX_WORKERS = 5
 TIMEOUT_SECONDS = 30
 COMMITS_PAGE_SIZE = 100
@@ -371,7 +498,7 @@ def _filter_and_rank_authors(author_state: Dict[str, Dict[str, Any]]) -> List[Di
         )
 
     ranked.sort(key=lambda item: (-item["commits"], item["name"].lower(), item["email"]))
-    return ranked[:MAX_CONTRIBUTORS]
+    return ranked[:MAX_RAW_CONTRIBUTORS]
 
 
 def _fetch_detail_stats_parallel(
@@ -449,35 +576,54 @@ def _serialize_payload(
 ) -> Dict[str, Any]:
     ranked = _filter_and_rank_authors(author_state)
 
-    authors_payload: Dict[str, Any] = {}
-    contributors: List[Dict[str, Any]] = []
+    # Convert ranked list to dict format for merging
+    authors_dict = {}
     for item in ranked:
-        files_changed = len(item["files_changed_set"])
-        author_entry = {
+        authors_dict[item["email"]] = {
             "commits": item["commits"],
-            "files_changed": files_changed,
+            "files_changed": len(item["files_changed_set"]),
             "lines_added": item["lines_added"],
             "lines_deleted": item["lines_deleted"],
             "net_lines": item["lines_added"] - item["lines_deleted"],
             "first_commit": item["first_commit"],
             "last_commit": item["last_commit"],
-            "recent_commits": sorted(
-                item["recent_commits"],
-                key=lambda commit: commit.get("date") or "",
-                reverse=True,
-            )[:5],
+            "recent_commits": item["recent_commits"],
         }
-        authors_payload[item["email"]] = author_entry
+
+    # Apply fuzzy merging
+    merged_authors = _merge_authors(authors_dict)
+
+    # Limit to final number of contributors
+    merged_authors = merged_authors[:MAX_FINAL_CONTRIBUTORS]
+
+    # Convert merged authors back to dict format for storage
+    authors_payload: Dict[str, Any] = {}
+    contributors: List[Dict[str, Any]] = []
+    for author in merged_authors:
+        # Use the first email as the key for the merged author
+        primary_email = author["emails"][0] if author.get("emails") else f"{author['name'].lower().replace(' ', '.')}@merged"
+        authors_payload[primary_email] = {
+            "name": author["name"],
+            "commits": author["commits"],
+            "files_changed": author["files_changed"],
+            "lines_added": author["lines_added"],
+            "lines_deleted": author["lines_deleted"],
+            "net_lines": author["net_lines"],
+            "first_commit": author["first_commit"],
+            "last_commit": author["last_commit"],
+            "recent_commits": author["recent_commits"],
+            "emails": author["emails"],  # Mark as merged
+        }
         contributors.append(
             {
-                "name": item["name"],
-                "email": item["email"],
-                "commits": item["commits"],
-                "lines_added": item["lines_added"],
-                "lines_deleted": item["lines_deleted"],
-                "files_changed": files_changed,
-                "first_commit": item["first_commit"],
-                "last_commit": item["last_commit"],
+                "name": author["name"],
+                "email": primary_email,
+                "commits": author["commits"],
+                "lines_added": author["lines_added"],
+                "lines_deleted": author["lines_deleted"],
+                "files_changed": author["files_changed"],
+                "first_commit": author["first_commit"],
+                "last_commit": author["last_commit"],
             }
         )
 
@@ -601,10 +747,5 @@ def extract_contributions_via_api(
 
 
 def save_contributions(repo_name: str, data: Dict[str, Any]) -> str:
-    """Save contributions data in the repository data folder."""
-    paths = _get_repo_paths(repo_name)
-    os.makedirs(paths["data_dir"], exist_ok=True)
-    destination = os.path.join(paths["data_dir"], "contributions.json")
-    with open(destination, "w", encoding="utf-8") as handle:
-        json.dump(data, handle, indent=2, ensure_ascii=False)
-    return destination
+    """Save contributions data to Redis."""
+    return save_json(repo_name, "contributions", data)

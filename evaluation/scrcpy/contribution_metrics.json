@@ -1,0 +1,33 @@
+{
+  "repo_name": "scrcpy",
+  "timestamp": "2026-03-22T17:02:44.314997+00:00",
+  "contribution_summary": {
+    "total_authors": 7,
+    "total_commits": 500,
+    "top_contributor_share_pct": 90.4
+  },
+  "git_history_metrics": {
+    "git_cumulative_lines_added": 382,
+    "git_cumulative_lines_deleted": 306,
+    "git_net_cumulative_lines": 76,
+    "files_changed_in_history": 46,
+    "note": "Git metrics are cumulative across all commits and can be inflated by large initial additions/deletions"
+  },
+  "repository_current_state": {
+    "actual_lines_of_code": 42659,
+    "total_source_files": 265,
+    "lines_by_language": {
+      "c": 23142,
+      "h": 7579,
+      "java": 11938
+    }
+  },
+  "data_completeness": {
+    "commit_sample_size": 500,
+    "detail_commit_sample_size": 50,
+    "fallback_mode": false,
+    "timed_out": false,
+    "has_line_stats": true,
+    "has_file_stats": true
+  }
+}

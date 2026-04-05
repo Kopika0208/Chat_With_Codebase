@@ -428,13 +428,13 @@ class DataFlowAnalyzer(ast.NodeVisitor):
         }
 
 
-def extract_function_dataflow(file_path: str, source_code: str) -> Dict[str, Any]:
+def extract_function_dataflow(file_path: str, source_code: str, tree: Optional[ast.AST] = None) -> Dict[str, Any]:
     """
     Extract data flow analysis for all functions in a file.
     Returns analysis results keyed by function name.
     """
     try:
-        tree = ast.parse(source_code)
+        tree = tree or ast.parse(source_code)
     except Exception as e:
         print(f"⚠️ Failed to parse {file_path}: {e}")
         return {}
