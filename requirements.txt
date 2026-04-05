@@ -3,6 +3,7 @@ GitPython==3.1.46
 langchain_community==0.4.1
 langchain_core==1.2.26
 langchain_groq==1.1.2
+langchain-voyageai
 langchain_huggingface==1.2.1
 langsmith==0.7.25
 networkx==3.6.1
@@ -17,4 +18,3 @@ tree_sitter==0.20.4
 tree_sitter_languages==1.10.2
 upstash_redis==1.7.0
 uvicorn>=0.12.0
-sentence-transformers==2.2.2
