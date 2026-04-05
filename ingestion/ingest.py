@@ -68,10 +68,10 @@ except ImportError:
     extract_calls_unified = None
 
 try:
-    from langchain_community.embeddings import HuggingFaceEmbeddings
+    from langchain_voyageai import VoyageAIEmbeddings
     from langchain_community.vectorstores import FAISS
 except ImportError:
-    HuggingFaceEmbeddings = None
+    VoyageAIEmbeddings = None
     FAISS = None
 
 try:
@@ -142,7 +142,7 @@ except ImportError:
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 EXTENSIONS = (".py", ".js", ".java", ".ts", ".md", ".txt", ".go", ".cpp", ".c", ".h", ".rs")
-EMBED_MODEL = "mixedbread-ai/mxbai-embed-large-v1"
+EMBED_MODEL = "voyage-code-3"
 BOOT_ENTRY_CANDIDATES = ("main", "app", "run", "start", "__main__")
 SUPPORTED_ANALYSIS_EXTENSIONS = {
     ".py", ".java", ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs"
@@ -425,11 +425,11 @@ except ImportError:
 try:
     from langchain_community.vectorstores import FAISS
     from langchain_core.documents import Document
-    from langchain_huggingface import HuggingFaceEmbeddings
+    from langchain_voyageai import VoyageAIEmbeddings
 except ImportError:
     FAISS = None
     Document = None
-    HuggingFaceEmbeddings = None
+    VoyageAIEmbeddings = None
 
 try:
     from .async_extractor import extract_async_patterns
@@ -1048,11 +1048,11 @@ def ingest_repo(
         if not pending_documents:
             return
 
-        if HuggingFaceEmbeddings is None or FAISS is None:
+        if VoyageAIEmbeddings is None or FAISS is None:
             raise RuntimeError("Embedding dependencies are not installed.")
 
         if embeddings is None:
-            embeddings = HuggingFaceEmbeddings(model_name=EMBED_MODEL)
+            embeddings = VoyageAIEmbeddings(model=EMBED_MODEL, voyage_api_key=os.getenv("VOYAGE_AI_API_KEY"), batch_size=128)
 
         batch = pending_documents
         pending_documents = []
@@ -1561,7 +1561,7 @@ def ingest_repos(
             aggregated_kg.graph.add_edge(edge)
 
     print("Merging vector stores...")
-    embeddings = HuggingFaceEmbeddings(model_name=EMBED_MODEL)
+    embeddings = VoyageAIEmbeddings(model=EMBED_MODEL, voyage_api_key=os.getenv("VOYAGE_AI_API_KEY"), batch_size=128)
     merged_vectorstore = FAISS.from_documents(all_documents, embeddings)
 
     aggregated_paths = _get_repo_paths(None)
