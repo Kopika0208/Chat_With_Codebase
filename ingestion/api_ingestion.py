@@ -394,7 +394,7 @@ def _materialize_outputs(
             raise RuntimeError("Embedding dependencies are not installed.")
         if embeddings is None:
             embeddings = _RateLimitedEmbeddings(
-                VoyageAIEmbeddings(model=EMBED_MODEL, voyage_api_key=os.getenv("VOYAGE_AI_API_KEY"), batch_size=128)
+                VoyageAIEmbeddings(model=EMBED_MODEL, voyage_api_key=os.getenv("VOYAGE_AI_API_KEY"), batch_size=16)
             )
 
         batch = pending_documents
