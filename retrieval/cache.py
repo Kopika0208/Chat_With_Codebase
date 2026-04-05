@@ -11,7 +11,7 @@ import traceback
 import streamlit as st
 from langchain_groq import ChatGroq
 from langchain_community.vectorstores import FAISS
-from langchain_voyageai import VoyageAIEmbeddings
+from langchain_community.embeddings import JinaEmbeddings
 
 from redis_storage import get_json, repo_exists
 
@@ -29,7 +29,7 @@ except ImportError:
 # ======================================================
 # 🔧 CONFIG
 # ======================================================
-EMBED_MODEL = "voyage-code-3"
+EMBED_MODEL = "jina-embeddings-v2-base-code"
 
 # Data directory is at project root, not inside retrieval/
 DATA_DIR = os.path.join(
@@ -148,7 +148,7 @@ def load_async_patterns_cached(repo_name: str):
 
 @st.cache_resource(show_spinner=False)
 def get_embeddings():
-    return VoyageAIEmbeddings(model=EMBED_MODEL, voyage_api_key=os.getenv("VOYAGE_AI_API_KEY"), batch_size=128)
+    return JinaEmbeddings(jina_api_key=os.getenv("JINA_API_KEY"), model_name=EMBED_MODEL)
 
 
 @st.cache_resource(show_spinner=False)
