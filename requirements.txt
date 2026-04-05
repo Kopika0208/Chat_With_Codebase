@@ -6,7 +6,6 @@ langchain_groq==1.1.2
 langchain_huggingface==1.2.1
 langsmith==0.7.25
 networkx==3.6.1
-networkx==3.5
 numpy==2.4.4
 pandas==3.0.2
 pydantic==2.12.5
