@@ -60,13 +60,6 @@ app = FastAPI(
 # CORS - allow React dev server
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:5173",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:5173",
-        "https://repo-mind-ten.vercel.app/",
-    ],
     allow_origins=["*"],
     allow_credentials=False,
     allow_methods=["*"],
