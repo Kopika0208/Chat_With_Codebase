@@ -32,7 +32,6 @@ from .ingest import (
     _get_repo_paths,
     _process_repo_file,
     _resolve_call_graph_symbol_fqn,
-    _RateLimitedEmbeddings,
 )
 from .knowledge_graph import KnowledgeGraphBuilder
 from .resolver import SymbolResolver
@@ -40,13 +39,13 @@ from .symbols import Scope, Symbol, SymbolTable, TypeInfo
 from .utils import GENERATED_MARKERS, MAX_FILE_BYTES, SKIP_DIR_NAMES, SKIP_FILE_NAMES, SKIP_SUFFIXES
 
 try:
+    from langchain_community.embeddings import JinaEmbeddings
     from langchain_community.vectorstores import FAISS
     from langchain_core.documents import Document
-    from langchain_voyageai import VoyageAIEmbeddings
 except ImportError:
+    JinaEmbeddings = None
     FAISS = None
     Document = None
-    VoyageAIEmbeddings = None
 
 
 REPO_INDEX_METADATA = "repo_index_metadata.json"
@@ -390,12 +389,10 @@ def _materialize_outputs(
         nonlocal embeddings, pending_documents, total_documents, vectorstore
         if not pending_documents:
             return
-        if VoyageAIEmbeddings is None or FAISS is None:
+        if JinaEmbeddings is None or FAISS is None:
             raise RuntimeError("Embedding dependencies are not installed.")
         if embeddings is None:
-            embeddings = _RateLimitedEmbeddings(
-                VoyageAIEmbeddings(model=EMBED_MODEL, voyage_api_key=os.getenv("VOYAGE_AI_API_KEY"), batch_size=16)
-            )
+            embeddings = JinaEmbeddings(jina_api_key=os.getenv("JINA_API_KEY"), model_name=EMBED_MODEL)
 
         batch = pending_documents
         pending_documents = []
