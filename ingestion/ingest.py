@@ -167,6 +167,37 @@ def _env_int(name: str, default: int) -> int:
 
 
 EMBED_BATCH_SIZE = max(16, _env_int("INGEST_EMBED_BATCH_SIZE", 128))
+
+
+import threading as _threading
+
+
+class _RateLimitedEmbeddings:
+    """Wraps VoyageAIEmbeddings to enforce the Voyage AI free-tier 3 RPM / 10K TPM limit.
+    Ensures at least 20 seconds between consecutive API calls (60s / 3 RPM).
+    """
+
+    def __init__(self, embeddings, rpm: int = 3):
+        self._embeddings = embeddings
+        self._interval = 60.0 / rpm  # 20 s between API calls
+        self._lock = _threading.Lock()
+        self._last_called = 0.0
+
+    def _throttle(self):
+        with self._lock:
+            wait = self._interval - (time.time() - self._last_called)
+            if wait > 0:
+                print(f"[Voyage AI] Rate-limit pause: {wait:.1f}s (3 RPM free tier)")
+                time.sleep(wait)
+            self._last_called = time.time()
+
+    def embed_documents(self, texts):
+        self._throttle()
+        return self._embeddings.embed_documents(texts)
+
+    def embed_query(self, text):
+        self._throttle()
+        return self._embeddings.embed_query(text)
 FILE_WORKERS = max(1, _env_int("INGEST_FILE_WORKERS", min(8, (os.cpu_count() or 4))))
 MAX_IN_FLIGHT_FILES = max(FILE_WORKERS, _env_int("INGEST_MAX_IN_FLIGHT_FILES", FILE_WORKERS * 2))
 PROGRESS_LOG_EVERY = max(1, _env_int("INGEST_PROGRESS_EVERY", 25))
@@ -1052,7 +1083,9 @@ def ingest_repo(
             raise RuntimeError("Embedding dependencies are not installed.")
 
         if embeddings is None:
-            embeddings = VoyageAIEmbeddings(model=EMBED_MODEL, voyage_api_key=os.getenv("VOYAGE_AI_API_KEY"), batch_size=128)
+            embeddings = _RateLimitedEmbeddings(
+                VoyageAIEmbeddings(model=EMBED_MODEL, voyage_api_key=os.getenv("VOYAGE_AI_API_KEY"), batch_size=128)
+            )
 
         batch = pending_documents
         pending_documents = []
@@ -1561,7 +1594,9 @@ def ingest_repos(
             aggregated_kg.graph.add_edge(edge)
 
     print("Merging vector stores...")
-    embeddings = VoyageAIEmbeddings(model=EMBED_MODEL, voyage_api_key=os.getenv("VOYAGE_AI_API_KEY"), batch_size=128)
+    embeddings = _RateLimitedEmbeddings(
+        VoyageAIEmbeddings(model=EMBED_MODEL, voyage_api_key=os.getenv("VOYAGE_AI_API_KEY"), batch_size=128)
+    )
     merged_vectorstore = FAISS.from_documents(all_documents, embeddings)
 
     aggregated_paths = _get_repo_paths(None)
