@@ -24,7 +24,7 @@ except ImportError:
     TARGET_REPO_DIR = os.path.join(_project_root, "repos", "myrepo")
     PROJECT_ROOT = _project_root
     EXTENSIONS = ('.py', '.js', '.java', '.ts', '.md', '.txt', '.go', '.cpp', '.c', '.h', '.rs')
-    EMBED_MODEL = "voyage-code-3"
+    EMBED_MODEL = "jina-embeddings-v2-base-code"
     # Functions will be None if import fails
     ingest_repo = None
     ingest_repos = None
