@@ -1,4 +1,4 @@
-# Chat_With_Codebase
+# RepoMind - GraphRAG Based AI System for Intelligent Codebase Analysis
 
 ## Upstash Redis Storage
 
